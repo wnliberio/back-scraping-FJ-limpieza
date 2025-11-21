@@ -1,0 +1,175 @@
+# app/dbb.py
+import os
+import json
+from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse, quote_plus
+from datetime import datetime, date
+
+import pytz
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+
+
+# =========================
+#   URL de BD (JDBC o separadas)
+# =========================
+
+def _build_database_url() -> str:
+    jdbc = os.getenv("URL") or os.getenv("JDBC_URL")
+    if jdbc:
+        if not jdbc.startswith("jdbc:"):
+            raise RuntimeError("URL no es JDBC (debe iniciar con 'jdbc:').")
+        parsed = urlparse(jdbc[len("jdbc:"):])           # mysql://host:port/db
+        if parsed.scheme != "mysql":
+            raise RuntimeError("Solo se soporta MySQL en JDBC_URL/URL.")
+        user = (parsed.username or os.getenv("DB_USER")) or ""
+        pwd  = (parsed.password or os.getenv("DB_PASSWORD")) or ""
+        if not user or not pwd:
+            raise RuntimeError("Faltan DB_USER/DB_PASSWORD para la URL JDBC.")
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 3306
+        db   = (parsed.path or "/").lstrip("/") or ""
+        return f"mysql+pymysql://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/{db}?charset=utf8mb4"
+
+    # variables sueltas
+    user = os.getenv("DB_USER")
+    pwd  = os.getenv("DB_PASSWORD")
+    host = os.getenv("DB_HOST")
+    port = os.getenv("DB_PORT", "3306")
+    name = os.getenv("DB_NAME")
+    if all([user, pwd, host, name]):
+        return f"mysql+pymysql://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/{name}?charset=utf8mb4"
+
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("Configura URL/JDBC_URL o DB_USER/DB_PASSWORD/DB_HOST/DB_NAME.")
+    return url
+
+
+DATABASE_URL = _build_database_url()
+
+# Forzar TLS si es Azure (require_secure_transport=ON)
+_connect_args: Dict[str, Any] = {}
+if DATABASE_URL.startswith("mysql+pymysql://"):
+    try:
+        import certifi
+        _connect_args["ssl"] = {"ca": certifi.where()}
+    except Exception:
+        _connect_args["ssl"] = {"ssl": True}
+
+engine = create_engine(
+    DATABASE_URL,
+    future=True,
+    pool_pre_ping=True,
+    pool_recycle=280,
+    connect_args=_connect_args,
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+# =========================
+#   Utilidades
+# =========================
+
+ECUADOR_TZ = pytz.timezone("America/Guayaquil")
+def ec_now_naive() -> datetime:
+    # guardamos naive en hora local para que MySQL no lo convierta raro
+    return datetime.now(ECUADOR_TZ).replace(tzinfo=None)
+
+def _parse_fecha(v) -> Optional[date]:
+    if not v:
+        return None
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str):
+        try:
+            return date.fromisoformat(v)
+        except Exception:
+            return None
+    return None
+
+def get_session():
+    return SessionLocal()
+
+# =========================
+#   Operaciones sobre reports (esquema viejo)
+# =========================
+
+def save_report(*, job_id: str, meta: Dict[str, Any], file_path: str, data_snapshot: Dict[str, Any]) -> int:
+    """
+    Inserta en 'reports' con columnas:
+    (id, job_id, tipo_alerta, monto_usd, fecha_alerta, file_path, data_snapshot, created_at)
+    Retorna el ID.
+    """
+    tipo_alerta = (meta or {}).get("tipo_alerta") or "Alerta"
+    monto_usd   = (meta or {}).get("monto_usd")
+    fecha_alerta = _parse_fecha((meta or {}).get("fecha_alerta"))
+
+    payload_json = json.dumps(data_snapshot or {}, ensure_ascii=False)
+
+    sql = text("""
+        INSERT INTO reports
+        (job_id, tipo_alerta, monto_usd, fecha_alerta, file_path, data_snapshot, created_at)
+        VALUES
+        (:job_id, :tipo_alerta, :monto_usd, :fecha_alerta, :file_path, :data_snapshot, :created_at)
+    """)
+    params = {
+        "job_id": job_id,
+        "tipo_alerta": tipo_alerta,
+        "monto_usd": monto_usd,
+        "fecha_alerta": fecha_alerta,
+        "file_path": file_path,
+        "data_snapshot": payload_json,
+        "created_at": ec_now_naive(),
+    }
+    with engine.begin() as conn:
+        conn.execute(sql, params)
+        rid = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar_one()
+        return int(rid)
+
+
+def list_reports(fecha_desde: Optional[str], fecha_hasta: Optional[str], only_docx: bool = True) -> List[Dict[str, Any]]:
+    """
+    Lista filtrando por created_at y, opcionalmente, solo registros con file_path .docx
+    """
+    where = []
+    params: Dict[str, Any] = {}
+
+    if fecha_desde:
+        where.append("created_at >= :desde")
+        params["desde"] = f"{fecha_desde} 00:00:00"
+    if fecha_hasta:
+        where.append("created_at <= :hasta")
+        params["hasta"] = f"{fecha_hasta} 23:59:59"
+    if only_docx:
+        where.append("file_path LIKE :ext")
+        params["ext"] = "%.docx"
+
+    sql = "SELECT id, job_id, tipo_alerta, monto_usd, fecha_alerta, file_path, created_at FROM reports"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC"
+
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append({
+                "id": r["id"],
+                "job_id": r["job_id"],
+                "tipo_alerta": r["tipo_alerta"],
+                "monto_usd": r["monto_usd"],
+                "fecha_alerta": r["fecha_alerta"].isoformat() if r["fecha_alerta"] else None,
+                "file_path": r["file_path"],
+                "created_at": r["created_at"].strftime("%Y-%m-%d %H:%M:%S") if r["created_at"] else None,
+            })
+        return out
+
+
+def get_report_path(report_id: int) -> Optional[str]:
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT file_path FROM reports WHERE id = :rid"),
+            {"rid": report_id},
+        ).first()
+        return row[0] if row else None
+

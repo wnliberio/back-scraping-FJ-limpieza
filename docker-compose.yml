@@ -1,0 +1,31 @@
+services:
+  backend-detectar:
+    build: .
+    container_name: backend-detectar
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PORT=8000
+      # Ajusta si tu módulo no es main:app
+      # - APP_MODULE=app.main:app
+    expose:
+      - "8000"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.api-detectar.rule=Host(`api-detectar.10-161-68-134.nip.io`)
+      - traefik.http.routers.api-detectar.entrypoints=web
+      - traefik.http.services.api-detectar.loadbalancer.server.port=8000
+    networks:
+      - mupi
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+networks:
+  mupi:
+    external: true
+    name: mupi-net
