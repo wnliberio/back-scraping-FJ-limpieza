@@ -5,6 +5,10 @@ from app.load_env import verificar_credenciales
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.services.load_client_data import load_client_data
+from app.db import get_db
+from app.db import get_db_for_data_load
+from sqlalchemy.orm import Session
 
 app = FastAPI(
     title="Sistema de Consultas Función Judicial",
@@ -57,42 +61,43 @@ except ImportError as e:
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicialización del sistema al arrancar"""
     print("🚀 Iniciando Sistema de Consultas v3.0")
-    
-    # Verificar conexión a base de datos
+
+    # --- Verificar DB destino ---
     try:
         from app.db import engine
-        print("✅ Conexión a base de datos verificada")
+        print("✅ Conexión a DB destino verificada")
     except Exception as e:
-        print(f"❌ Error de conexión a BD: {e}")
-    
-    # Verificar tablas de tracking
+        print(f"❌ Error de conexión a DB destino: {e}")
+
+    # --- Verificar DB origen ---
     try:
-        from app.services.tracking_professional import get_paginas_activas
-        paginas = get_paginas_activas()
-        print(f"✅ Sistema de tracking iniciado - {len(paginas)} páginas disponibles")
+        from app.db.origen import test_origen_connection
+        if test_origen_connection():
+            print("✅ Conexión a DB origen verificada")
     except Exception as e:
-        print(f"⚠️ Sistema de tracking no disponible: {e}")
-        import traceback
-        traceback.print_exc()  # ← ESTO MOSTRARÁ EL ERROR COMPLETO
-    
-    # Verificar daemon
-    try:
-        from app.services.daemon_procesador import obtener_estado_daemon
-        estado = obtener_estado_daemon()
-        print(f"✅ Daemon disponible - Estado: {'Running' if estado['running'] else 'Stopped'}")
-    except Exception as e:
-        print(f"⚠️ Daemon no disponible: {e}")
-    
+        print(f"❌ Error de conexión a DB origen: {e}")
+
+
+    # --- Cargar datos si ambas DB OK ---
+    if origen_db:
+        try:
+            from app.db import get_db
+            destino_db = next(get_db())
+            load_client_data(
+                origen_db=origen_db,
+                destino_db=destino_db,
+                start_date='2025-09-29',
+                end_date='2025-09-30'
+            )
+            destino_db.close()
+            print("✅ Datos cargados exitosamente en de_clientes_rpa")
+        except Exception as e:
+            print(f"⚠️ Error cargando datos: {e}")
+        finally:
+            origen_db.close()
+
     print("🎯 Sistema listo para recibir requests")
-    print("\n" + "="*60)
-    print("📌 ENDPOINTS IMPORTANTES:")
-    print("   POST /api/daemon/iniciar   - Iniciar procesamiento automático")
-    print("   POST /api/daemon/detener   - Detener procesamiento")
-    print("   GET  /api/daemon/estado    - Ver estado del daemon")
-    print("   GET  /api/tracking/clientes - Ver clientes (con filtros)")
-    print("="*60 + "\n")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -182,3 +187,4 @@ def health_check():
         health_status["components"]["daemon"] = f"error: {str(e)}"
     
     return health_status
+    

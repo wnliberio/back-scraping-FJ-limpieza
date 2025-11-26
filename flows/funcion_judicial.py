@@ -18,7 +18,7 @@ from core.browser import create_driver, close_driver
 from core.utils.log import log
 from core.utils.screenshot import save_fullpage_png
 from core.human import (
-    wait_random,
+    
     random_scroll_smooth,
     human_like_scroll_and_read,
     move_mouse_in_circle,

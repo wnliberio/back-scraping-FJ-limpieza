@@ -122,6 +122,13 @@ def test_connection():
         print(f"❌ Error de conexión: {e}")
         return False
 
+def get_db_for_data_load():
+    """Dependencia específica para la carga de datos en de_clientes_rpa."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 __all__ = [
     "engine",
