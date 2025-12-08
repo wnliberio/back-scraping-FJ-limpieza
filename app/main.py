@@ -1,13 +1,11 @@
-# app/main.py - VERSIÓN CON DAEMON AUTOMÁTICO
+# app/main.py - VERSIÓN FINAL (con health check corregido)
 
 # ⚠️ CRÍTICO: Cargar .env ANTES de cualquier otra importación
 from app.load_env import verificar_credenciales
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.services.load_client_data import load_client_data
-from app.db import get_db
-from app.db import get_db_for_data_load
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 app = FastAPI(
@@ -41,7 +39,7 @@ try:
 except ImportError as e:
     print(f"❌ Error cargando router tracking: {e}")
 
-# Router del Daemon (NUEVO)
+# Router del Daemon
 try:
     from app.routers.daemon import router as daemon_router
     app.include_router(daemon_router, prefix="/api")
@@ -49,7 +47,15 @@ try:
 except ImportError as e:
     print(f"❌ Error cargando router daemon: {e}")
 
-# Router de Reports (si existe)
+# Router de Sincronización (NUEVO)
+try:
+    from app.api.endpoints.sincronizacion import router as sync_router
+    app.include_router(sync_router)
+    print("✅ Router sincronización cargado")
+except ImportError as e:
+    print(f"⚠️ Router sincronización no disponible: {e}")
+
+# Router de Reports
 try:
     from app.routers.reports import router as reports_router
     app.include_router(reports_router, prefix="/api")
@@ -70,32 +76,27 @@ async def startup_event():
     except Exception as e:
         print(f"❌ Error de conexión a DB destino: {e}")
 
-    # --- Verificar DB origen ---
+    # --- Verificar DB origen (DB2) ---
     try:
-        from app.db.origen import test_origen_connection
-        if test_origen_connection():
-            print("✅ Conexión a DB origen verificada")
+        from app.db.origen_db2 import test_conexion_db2
+        if test_conexion_db2():
+            print("✅ Conexión a DB2 verificada")
+    except ImportError:
+        print("⚠️ DB2 origen no disponible")
     except Exception as e:
-        print(f"❌ Error de conexión a DB origen: {e}")
+        print(f"❌ Error de conexión a DB2: {e}")
 
-
-    # --- Cargar datos si ambas DB OK ---
-    if origen_db:
-        try:
-            from app.db import get_db
-            destino_db = next(get_db())
-            load_client_data(
-                origen_db=origen_db,
-                destino_db=destino_db,
-                start_date='2025-09-29',
-                end_date='2025-09-30'
-            )
-            destino_db.close()
-            print("✅ Datos cargados exitosamente en de_clientes_rpa")
-        except Exception as e:
-            print(f"⚠️ Error cargando datos: {e}")
-        finally:
-            origen_db.close()
+    # --- NUEVO: Inicializar Scheduler de Sincronización ---
+    try:
+        from app.services.scheduler_sincronizacion import inicializar_scheduler
+        if inicializar_scheduler():
+            print("✅ Scheduler de sincronización inicializado")
+        else:
+            print("⚠️ No se pudo inicializar scheduler de sincronización")
+    except ImportError:
+        print("⚠️ Scheduler de sincronización no disponible")
+    except Exception as e:
+        print(f"⚠️ Error inicializando scheduler: {e}")
 
     print("🎯 Sistema listo para recibir requests")
 
@@ -103,6 +104,13 @@ async def startup_event():
 async def shutdown_event():
     """Limpieza al cerrar el sistema"""
     print("🛑 Cerrando sistema...")
+    
+    # Detener scheduler de sincronización
+    try:
+        from app.services.scheduler_sincronizacion import detener_scheduler
+        detener_scheduler()
+    except Exception as e:
+        print(f"⚠️ Error deteniendo scheduler: {e}")
     
     # Detener daemon si está corriendo
     try:
@@ -130,6 +138,7 @@ def root():
             "tracking_granular": True,
             "procesamiento_automatico": True,
             "daemon_controlable": True,
+            "sincronizacion_automatica": True,
             "solo_funcion_judicial": True
         },
         "endpoints": {
@@ -137,6 +146,11 @@ def root():
                 "/api/daemon/iniciar",
                 "/api/daemon/detener",
                 "/api/daemon/estado"
+            ],
+            "sincronizacion": [
+                "/api/sync/iniciar",
+                "/api/sync/estado",
+                "/api/sync/auditoria"
             ],
             "tracking": [
                 "/api/tracking/health",
@@ -158,16 +172,26 @@ def health_check():
         "components": {}
     }
     
-    # Verificar BD
+    # Verificar BD destino
     try:
         from app.db import SessionLocal
         db = SessionLocal()
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))  # ✅ CORREGIDO: usar text()
         db.close()
         health_status["components"]["database"] = "ok"
     except Exception as e:
         health_status["components"]["database"] = f"error: {str(e)}"
         health_status["status"] = "degraded"
+    
+    # Verificar DB origen (DB2)
+    try:
+        from app.db.origen_db2 import test_conexion_db2
+        if test_conexion_db2():
+            health_status["components"]["db2"] = "ok"
+        else:
+            health_status["components"]["db2"] = "error"
+    except Exception as e:
+        health_status["components"]["db2"] = f"error: {str(e)}"
     
     # Verificar tracking
     try:
@@ -186,5 +210,12 @@ def health_check():
     except Exception as e:
         health_status["components"]["daemon"] = f"error: {str(e)}"
     
-    return health_status
+    # Verificar scheduler de sincronización
+    try:
+        from app.services.scheduler_sincronizacion import obtener_estado_scheduler
+        estado_sync = obtener_estado_scheduler()
+        health_status["components"]["scheduler"] = "running" if estado_sync["running"] else "stopped"
+    except Exception as e:
+        health_status["components"]["scheduler"] = f"error: {str(e)}"
     
+    return health_status

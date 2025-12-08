@@ -16,3 +16,4 @@ typing_extensions==4.14.1
 pyodbc==5.2.0
 uvicorn
 fastapi
+apscheduler

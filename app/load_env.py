@@ -30,10 +30,10 @@ def verificar_credenciales():
         return False
     
     print(f"✅ Credenciales de BD cargadas correctamente:")
-    print(f"   - DB_USER: {os.getenv('DB_USER')}")
-    print(f"   - DB_HOST: {os.getenv('DB_HOST')}")
-    print(f"   - DB_NAME: {os.getenv('DB_NAME')}")
-    print(f"   - DB_PASSWORD: {'*' * len(os.getenv('DB_PASSWORD', ''))}")
+    #print(f"   - DB_USER: {os.getenv('DB_USER')}")
+    #print(f"   - DB_HOST: {os.getenv('DB_HOST')}")
+    #print(f"   - DB_NAME: {os.getenv('DB_NAME')}")
+    #print(f"   - DB_PASSWORD: {'*' * len(os.getenv('DB_PASSWORD', ''))}")
     return True
 
 # Auto-verificar al importar
