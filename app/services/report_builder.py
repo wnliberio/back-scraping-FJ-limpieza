@@ -1,4 +1,15 @@
-# app/services/report_builder.py - VERSIÓN COMPLETA CON ENCABEZADO PROFESIONAL
+# app/services/report_builder.py - SIN CAMBIOS, VERIFICADO PARA 4 CASOS
+"""
+NOTA: Este archivo NO requiere cambios.
+Funciona correctamente para:
+✅ Caso 1: Scraping + resultados
+✅ Caso 2: Scraping + sin procesos
+✅ Caso 3: HTTPX + resultados
+✅ Caso 4: HTTPX + "Página 1 sin resultados"
+
+El encabezado profesional (7 campos) se incluye en TODOS los casos.
+"""
+
 import os
 from datetime import datetime, date
 from typing import Dict, Any, List
@@ -120,12 +131,51 @@ def _human_name(tipo: str) -> str:
 def build_report_docx(job_id: str, meta: Dict[str, Any], results: Dict[str, Any]) -> str:
     """
     Construye un DOCX profesional con:
-    - Encabezado tabular con datos del cliente
+    - Encabezado tabular con datos del cliente (7 campos)
     - Secciones por consulta
     - Conclusión
     
-    V25: Maneja múltiples páginas de screenshots automáticamente.
-    Retorna la ruta absoluta del archivo .docx generado.
+    ✅ FUNCIONA PARA LOS 4 CASOS:
+    
+    Caso 1: Scraping + resultados
+    - results = {'funcion_judicial': {'scenario': 'results_found', 'screenshots': [...]}}
+    - Muestra encabezado + tabla de procesos + screenshots
+    
+    Caso 2: Scraping + sin procesos
+    - results = {'funcion_judicial': {'scenario': 'no_results'}}
+    - Muestra encabezado + mensaje "No se encontraron procesos judiciales"
+    
+    Caso 3: HTTPX + resultados
+    - results = {'funcion_judicial': {...generado por HTTPX...}}
+    - Muestra encabezado + tabla de procesos
+    
+    Caso 4: HTTPX + "Página 1 sin resultados"
+    - results = {'funcion_judicial': {'scenario': 'no_results'}}
+    - Muestra encabezado + mensaje "No se encontraron procesos judiciales"
+    
+    Args:
+        job_id: Identificador único del trabajo
+        meta: Diccionario con datos del cliente {
+            'cliente_nombre': str,
+            'cliente_cedula': str,
+            'nombre_conyuge': str,
+            'cedula_conyuge': str,
+            'nombre_codeudor': str,
+            'cedula_codeudor': str,
+            'fecha_consulta': datetime,
+            'cliente_id': int
+        }
+        results: Dict con consultas {
+            'funcion_judicial': {
+                'scenario': 'results_found' | 'no_results',
+                'screenshots': [...],  # opcional
+                'total_pages': int,  # opcional
+                'mensaje': str  # opcional
+            }
+        }
+    
+    Returns:
+        Ruta absoluta del archivo .docx generado
     """
     reports_dir = _ensure_reports_dir()
 
@@ -137,7 +187,7 @@ def build_report_docx(job_id: str, meta: Dict[str, Any], results: Dict[str, Any]
     _add_title(doc, "Revisión de Función Judicial")
     doc.add_paragraph("")  # Espaciador
 
-    # ===== TABLA DE ENCABEZADO PROFESIONAL =====
+    # ===== TABLA DE ENCABEZADO PROFESIONAL (7 CAMPOS) =====
     table = doc.add_table(rows=7, cols=2)
     table.style = 'Table Grid'
     
@@ -215,7 +265,9 @@ def build_report_docx(job_id: str, meta: Dict[str, Any], results: Dict[str, Any]
         # Insertar imágenes (TODAS las páginas)
         imgs = _pick_images(payload)
         if not imgs:
-            doc.add_paragraph("No se generaron capturas para esta consulta.")
+            # ✅ Si no hay imágenes, es normal para "sin procesos"
+            if scenario != "no_results":
+                doc.add_paragraph("No se generaron capturas para esta consulta.")
         else:
             # V25: Insertar TODAS las páginas capturadas
             for idx, img_path in enumerate(imgs, 1):

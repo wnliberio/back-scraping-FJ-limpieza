@@ -3,6 +3,11 @@
 Fallback para consultas de Función Judicial usando API directa (HTTPX).
 Se usa cuando el web scraping falla (no hay screenshots de resultados).
 
+MEJORA V2:
+- SIEMPRE retorna (ruta_reporte, resultado)
+- Incluso cuando "Página 1 sin resultados" → genera reporte vacío
+- Nunca retorna None (salvo error crítico)
+
 Características:
 - Consulta hasta 20 páginas
 - Genera DOCX con tablas formateadas
@@ -14,7 +19,7 @@ import httpx
 from docx import Document
 from datetime import datetime, timedelta, timezone
 import os
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import traceback
 
 # ===== CONFIGURACIÓN =====
@@ -76,7 +81,7 @@ def _consultar_pagina_api(nombre_buscado: str, page: int) -> Optional[List[Dict[
         page: Número de página (1-based)
         
     Returns:
-        Lista de procesos encontrados o None si error
+        Lista de procesos encontrados, lista vacía si sin resultados, None si error
     """
     try:
         url = (
@@ -126,7 +131,8 @@ def _consultar_pagina_api(nombre_buscado: str, page: int) -> Optional[List[Dict[
         else:
             return None
         
-        return resultados if resultados else None
+        # ✅ MEJORA: Retornar lista vacía en lugar de None cuando sin datos
+        return resultados if resultados else []
         
     except httpx.TimeoutException:
         log(f"⚠️ Timeout consultando página {page}")
@@ -139,17 +145,28 @@ def _consultar_pagina_api(nombre_buscado: str, page: int) -> Optional[List[Dict[
 def generar_reporte_httpx(
     nombre_cliente: str,
     job_id: str
-) -> Optional[str]:
+) -> Tuple[Optional[str], Dict[str, Any]]:
     """
     Genera reporte DOCX consultando API de Función Judicial directamente.
     Se usa como fallback cuando el web scraping falla.
+    
+    ✅ MEJORA: SIEMPRE retorna (ruta, resultado)
+    - Incluso cuando "Página 1 sin resultados" → genera reporte vacío
+    - Nunca retorna (None, ...) salvo error crítico
     
     Args:
         nombre_cliente: Nombre completo del cliente (ej: "PAMELA ALEXANDRA CASTRO DEL POZO")
         job_id: ID único del proceso (ej: "daemon_8d8c1f044264")
         
     Returns:
-        Ruta del archivo DOCX generado o None si falla
+        Tupla (ruta_reporte, resultado_dict):
+        - ruta_reporte: Ruta del DOCX generado (NUNCA None excepto error crítico)
+        - resultado_dict: Dict con info de la consulta {
+            'scenario': 'results_found' | 'no_results',
+            'total_procesos': int,
+            'total_paginas': int,
+            'mensaje': str
+          }
     """
     try:
         log(f"🌐 Iniciando consulta API para: {nombre_cliente}")
@@ -171,10 +188,17 @@ def generar_reporte_httpx(
             
             resultados = _consultar_pagina_api(nombre_cliente, page)
             
-            if not resultados:
-                log(f"📭 Página {page} sin resultados, finalizando")
-                break
+            # ✅ MEJORA: Diferenciar entre "sin datos" (lista vacía) y "error" (None)
+            if resultados is None:
+                log(f"⚠️ Error consultando página {page}, deteniendo...")
+                break  # Error de red, detener
             
+            if not resultados:
+                # Lista vacía = "Página sin resultados" (no error)
+                log(f"📭 Página {page} sin resultados, finalizando")
+                break  # Sin más páginas
+            
+            # Sí hay datos
             alguna_pagina_con_datos = True
             pagina_actual = page
             total_resultados += len(resultados)
@@ -214,28 +238,60 @@ def generar_reporte_httpx(
             # Espacio entre páginas
             doc.add_paragraph("")
         
-        # 6. Validar que se obtuvieron resultados
-        if not alguna_pagina_con_datos:
-            log(f"❌ No se obtuvieron resultados de la API")
-            return None
+        # ✅ MEJORA: Generar reporte INCLUSO sin datos
         
-        # 7. Resumen final
+        # Determinar escenario
+        if alguna_pagina_con_datos:
+            scenario = "results_found"
+            mensaje = f"Se encontraron {total_resultados} procesos judiciales en {pagina_actual} página(s)"
+        else:
+            scenario = "no_results"
+            mensaje = "No se encontraron procesos judiciales"
+            # Agregar mensaje al documento
+            doc.add_paragraph(mensaje)
+        
+        # Resumen final
         doc.add_heading("Resumen", level=2)
         doc.add_paragraph(f"Total de procesos encontrados: {total_resultados}")
         doc.add_paragraph(f"Páginas consultadas: {pagina_actual}")
         
-        # 8. Guardar documento con nombre: {nombre_cliente}_{job_id}.docx
-        nombre_archivo = f"{nombre_cliente.replace(' ', '_')}_{job_id}.docx"
+        # Guardar documento
+        nombre_archivo = f"reporte_FJ_httpx_{nombre_cliente.replace(' ', '_')}_{job_id}.docx"
         ruta_completa = os.path.join(REPORTS_DIR, nombre_archivo)
         
-        doc.save(ruta_completa)
-        log(f"✅ Reporte DOCX generado: {ruta_completa}")
-        log(f"   - Total procesos: {total_resultados}")
-        log(f"   - Páginas: {pagina_actual}")
+        try:
+            doc.save(ruta_completa)
+            log(f"✅ Reporte DOCX generado: {ruta_completa}")
+            log(f"   - Escenario: {scenario}")
+            log(f"   - Total procesos: {total_resultados}")
+            log(f"   - Páginas: {pagina_actual}")
+        except Exception as e:
+            log(f"❌ Error guardando documento: {e}")
+            return None, {
+                "scenario": "error",
+                "total_procesos": 0,
+                "total_paginas": 0,
+                "mensaje": f"Error guardando documento: {str(e)}"
+            }
         
-        return ruta_completa
+        # ✅ Retornar SIEMPRE (ruta, resultado)
+        resultado = {
+            "scenario": scenario,
+            "total_procesos": total_resultados,
+            "total_paginas": pagina_actual,
+            "mensaje": mensaje
+        }
+        
+        return ruta_completa, resultado
         
     except Exception as e:
         log(f"❌ Error generando reporte HTTPX: {e}")
         traceback.print_exc()
-        return None
+        
+        # ✅ MEJORA: Retornar (None, error_dict) en caso de error crítico
+        return None, {
+            "scenario": "error",
+            "total_procesos": 0,
+            "total_paginas": 0,
+            "mensaje": f"Error crítico: {str(e)}"
+        }
