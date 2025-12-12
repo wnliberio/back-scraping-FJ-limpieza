@@ -1,4 +1,4 @@
-# app/services/report_builder.py
+# app/services/report_builder.py - VERSIÓN COMPLETA CON ENCABEZADO PROFESIONAL
 import os
 from datetime import datetime, date
 from typing import Dict, Any, List
@@ -119,7 +119,11 @@ def _human_name(tipo: str) -> str:
 
 def build_report_docx(job_id: str, meta: Dict[str, Any], results: Dict[str, Any]) -> str:
     """
-    Construye un DOCX profesional (APA-like) con portada, secciones por consulta y conclusión.
+    Construye un DOCX profesional con:
+    - Encabezado tabular con datos del cliente
+    - Secciones por consulta
+    - Conclusión
+    
     V25: Maneja múltiples páginas de screenshots automáticamente.
     Retorna la ruta absoluta del archivo .docx generado.
     """
@@ -129,27 +133,55 @@ def build_report_docx(job_id: str, meta: Dict[str, Any], results: Dict[str, Any]
     doc = Document()
     _set_doc_defaults(doc)
 
-    # Portada / Encabezado
+    # ===== PORTADA / ENCABEZADO PROFESIONAL =====
     _add_title(doc, "Revisión de Función Judicial")
-    tipo_alerta = str(meta.get("tipo_alerta", "General"))
-    monto = meta.get("monto_usd", None)
-    fecha_alerta = meta.get("fecha_alerta")
+    doc.add_paragraph("")  # Espaciador
 
-    # Normalizar fecha
-    if isinstance(fecha_alerta, str):
-        try:
-            fecha_alerta = date.fromisoformat(fecha_alerta)
-        except Exception:
-            fecha_alerta = None
-
-    doc.add_paragraph(f"Tipo de alerta: {tipo_alerta}")
-    if monto is not None:
-        doc.add_paragraph(f"Monto (USD): {_format_money(monto)}")
-    if fecha_alerta:
-        doc.add_paragraph(f"Fecha de la alerta: {fecha_alerta.isoformat()}")
-    doc.add_paragraph(f"Fecha de generación: {datetime.now().isoformat(sep=' ', timespec='seconds')}")
-
-    doc.add_paragraph("")  # espacio
+    # ===== TABLA DE ENCABEZADO PROFESIONAL =====
+    table = doc.add_table(rows=7, cols=2)
+    table.style = 'Table Grid'
+    
+    # Ancho de columnas (1ª columna 40%, 2ª columna 60%)
+    for row in table.rows:
+        row.cells[0].width = Cm(4.0)
+        row.cells[1].width = Cm(6.54)
+    
+    rows = table.rows
+    
+    # Fila 1: Fecha de consulta
+    rows[0].cells[0].text = "Fecha de consulta:"
+    fecha_consulta = meta.get('fecha_consulta')
+    if isinstance(fecha_consulta, datetime):
+        rows[0].cells[1].text = fecha_consulta.strftime('%d/%m/%Y %H:%M:%S')
+    else:
+        rows[0].cells[1].text = str(fecha_consulta) if fecha_consulta else datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+    
+    # Fila 2: Nombre del titular
+    rows[1].cells[0].text = "Nombre del titular:"
+    rows[1].cells[1].text = meta.get('cliente_nombre', 'N/A')
+    
+    # Fila 3: Cédula del titular
+    rows[2].cells[0].text = "Cédula del titular:"
+    rows[2].cells[1].text = str(meta.get('cliente_cedula', 'N/A'))
+    
+    # Fila 4: Nombre del cónyuge
+    rows[3].cells[0].text = "Nombre del cónyuge:"
+    rows[3].cells[1].text = meta.get('nombre_conyuge', 'No aplica')
+    
+    # Fila 5: Cédula del cónyuge
+    rows[4].cells[0].text = "Cédula del cónyuge:"
+    rows[4].cells[1].text = str(meta.get('cedula_conyuge', 'No aplica'))
+    
+    # Fila 6: Nombre del codeudor
+    rows[5].cells[0].text = "Nombre del codeudor:"
+    rows[5].cells[1].text = meta.get('nombre_codeudor', 'No aplica')
+    
+    # Fila 7: Cédula del codeudor
+    rows[6].cells[0].text = "Cédula del codeudor:"
+    rows[6].cells[1].text = str(meta.get('cedula_codeudor', 'No aplica'))
+    
+    # Espaciador después de la tabla
+    doc.add_paragraph("")
 
     # Secciones por consulta
     width_in = _available_width_inches(doc)

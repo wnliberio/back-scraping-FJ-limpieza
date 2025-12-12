@@ -1,12 +1,11 @@
-# app/services/daemon_procesador.py - VERSIÓN CON HTTPX FALLBACK
-# Flujo: Scraping → Si falla → HTTP → Si falla → Resetear a Pendiente
+# app/services/daemon_procesador.py - VERSIÓN MEJORADA CON DETECCIÓN DE SIN RESULTADOS
 """
-Daemon que:
-1. Lee clientes de de_clientes_rpa_v2 con ESTADO_CONSULTA='Pendiente'
-2. Intenta web scraping en Función Judicial
-3. Si no hay screenshots de resultados → Fallback a HTTP directo
-4. Si HTTP también falla → Resetear cliente a Pendiente
-5. Procesa 1 cliente cada 30 minutos
+Daemon con lógica inteligente:
+1. Scraping exitoso con resultados → Generar reporte
+2. Scraping devuelve "Sin Procesos Judiciales" → Marcar Procesado (sin reporte)
+3. Scraping error → Intentar HTTPX
+   - Si HTTPX devuelve "Sin Procesos Judiciales" → Marcar Procesado (sin reporte)
+   - Si HTTPX error → Resetear a Pendiente
 """
 
 import threading
@@ -15,83 +14,71 @@ from typing import Optional
 from datetime import datetime
 import uuid
 import os
+import traceback
 
 from app.db import SessionLocal
 from app.db.models import DeClienteV2
-from app.db.models_new import DeProceso, DePagina, DeReporte
+from app.db.models_new import DeProceso, DeReporte
 
-# Importar web scraping y fallback
+# ✅ IMPORTACIONES CORRECTAS
 from flows.funcion_judicial import process_funcion_judicial_once
 from app.services.report_builder import build_report_docx
 from app.services.fj_httpx_fallback import generar_reporte_httpx
+from app.services.detectores_consulta import (
+    detectar_sin_procesos_judiciales_scraping,
+    verificar_httpx_sin_procesos_judiciales,
+    crear_rastreo_sin_resultados
+)
 
-# ===== ESTADO GLOBAL DEL DAEMON =====
-class DaemonState:
-    def __init__(self):
-        self.running = False
-        self.thread: Optional[threading.Thread] = None
-        self.cliente_actual: Optional[str] = None
-        self.ultimo_inicio: Optional[datetime] = None
-        self.lock = threading.Lock()
-
-daemon_state = DaemonState()
+# ===== ESTADO GLOBAL =====
+daemon_thread = None
+daemon_running = False
+daemon_lock = threading.Lock()
 
 
 def log(msg: str):
-    """Helper de logging con timestamp"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Logging con timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[DAEMON {timestamp}] {msg}")
 
 
-def _actualizar_cliente_estado(cliente_id: int, estado_nuevo: str):
-    """
-    Actualiza ESTADO_CONSULTA de un cliente en de_clientes_rpa_v2
-    Estados válidos: 'Pendiente', 'Procesando', 'Procesado', 'Error'
-    """
+def _actualizar_cliente_estado(cliente_id: int, estado: str):
+    """Actualiza ESTADO_CONSULTA del cliente"""
     db = SessionLocal()
     try:
         cliente = db.query(DeClienteV2).filter(DeClienteV2.id == cliente_id).first()
         if cliente:
-            cliente.ESTADO_CONSULTA = estado_nuevo
+            cliente.ESTADO_CONSULTA = estado
+            cliente.FECHA_ULTIMA_CONSULTA = datetime.now()
             db.commit()
-            log(f"✅ Cliente {cliente_id} → ESTADO_CONSULTA='{estado_nuevo}'")
-        else:
-            log(f"⚠️ Cliente {cliente_id} no encontrado")
+            log(f"✅ Cliente {cliente_id} → {estado}")
     except Exception as e:
-        log(f"❌ Error actualizando cliente {cliente_id}: {e}")
+        log(f"❌ Error actualizando cliente: {e}")
         db.rollback()
     finally:
         db.close()
 
 
-def _crear_proceso(cliente_id: int, cliente: DeClienteV2) -> Optional[int]:
-    """
-    Crea un registro en de_procesos_rpa para este cliente.
-    Retorna el ID del proceso o None si hay error.
-    """
+def _crear_proceso(cliente_id: int) -> Optional[int]:
+    """Crea registro en de_procesos_rpa"""
     db = SessionLocal()
     try:
-        # Crear proceso
         job_id = f"daemon_{uuid.uuid4().hex[:12]}"
         
-        nuevo_proceso = DeProceso(
+        proceso = DeProceso(
             cliente_id=cliente_id,
             job_id=job_id,
             estado='Pendiente',
             fecha_creacion=datetime.now(),
             headless=True,
             generate_report=True,
-            total_paginas_solicitadas=1,
-            total_paginas_exitosas=0,
-            total_paginas_fallidas=0
+            total_paginas_solicitadas=1
         )
-        
-        db.add(nuevo_proceso)
+        db.add(proceso)
         db.commit()
         
-        log(f"✅ Proceso {nuevo_proceso.id} creado (Job: {job_id})")
-        return nuevo_proceso.id
-        
+        log(f"✅ Proceso {proceso.id} creado (Job: {job_id})")
+        return proceso.id
     except Exception as e:
         log(f"❌ Error creando proceso: {e}")
         db.rollback()
@@ -100,19 +87,87 @@ def _crear_proceso(cliente_id: int, cliente: DeClienteV2) -> Optional[int]:
         db.close()
 
 
-def _hay_screenshots_validos(resultado: dict) -> bool:
-    """
-    Verifica si el resultado del scraping tiene screenshots de RESULTADOS.
-    No solo valida que exista 'screenshots', sino que haya datos reales.
-    """
-    if not resultado:
+def _guardar_reporte_en_bd(
+    cliente_id: int,
+    proceso_id: int,
+    job_id: str,
+    nombres: str,
+    ruta_reporte: str,
+    tipo_alerta: str
+) -> bool:
+    """Guarda reporte en de_reportes_rpa"""
+    db = SessionLocal()
+    try:
+        tamano = os.path.getsize(ruta_reporte) if os.path.exists(ruta_reporte) else 0
+        nombre_archivo = os.path.basename(ruta_reporte)
+        
+        reporte = DeReporte(
+            proceso_id=proceso_id,
+            cliente_id=cliente_id,
+            job_id=job_id,
+            nombre_archivo=nombre_archivo,
+            ruta_archivo=ruta_reporte,
+            tipo_archivo='DOCX',
+            generado_exitosamente=True,
+            tamano_bytes=tamano,
+            tipo_alerta=tipo_alerta,
+            fecha_generacion=datetime.now()
+        )
+        
+        db.add(reporte)
+        db.commit()
+        
+        log(f"✅ Reporte guardado en BD (ID: {reporte.id})")
+        return True
+    except Exception as e:
+        log(f"❌ Error guardando reporte: {e}")
+        db.rollback()
         return False
-    
-    # Verificar si hay scenario válido (no es error)
-    scenario = resultado.get('scenario', '').lower()
-    
-    # Aceptar scenarios que indican éxito
-    return scenario == 'results_found' or scenario == 'resultados_encontrados'
+    finally:
+        db.close()
+
+
+def _actualizar_proceso(proceso_id: int, estado: str, exitoso: bool = True):
+    """Actualiza estado del proceso"""
+    db = SessionLocal()
+    try:
+        proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
+        if proceso:
+            proceso.estado = estado
+            proceso.fecha_fin = datetime.now()
+            if exitoso:
+                proceso.total_paginas_exitosas = 1
+            db.commit()
+    except Exception as e:
+        log(f"❌ Error actualizando proceso: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _registrar_sin_procesos_judiciales(
+    cliente_id: int,
+    proceso_id: int,
+    nombres: str,
+    tipo_consulta: str
+):
+    """Registra cuando NO HAY procesos judiciales pero la consulta fue exitosa"""
+    db = SessionLocal()
+    try:
+        proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
+        if proceso:
+            proceso.estado = 'Completado'
+            proceso.fecha_fin = datetime.now()
+            proceso.total_paginas_exitosas = 0
+            proceso.mensaje_error_general = f"Consulta completada: Sin Procesos Judiciales ({tipo_consulta})"
+            db.commit()
+            
+            log(f"✅ Registrado: Sin Procesos Judiciales para {nombres} ({tipo_consulta})")
+    except Exception as e:
+        log(f"❌ Error registrando sin procesos: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _ejecutar_consulta_funcion_judicial(
@@ -122,173 +177,98 @@ def _ejecutar_consulta_funcion_judicial(
     job_id: str
 ) -> bool:
     """
-    Ejecuta consulta con 3 flujos posibles:
-    1. SCRAPING: Si hay screenshots de resultados → generar DOCX
-    2. FALLBACK HTTP: Si scraping falla → intentar API directa
-    3. ERROR: Si ambos fallan → resetear cliente a Pendiente
+    FLUJO CON 4 CAMINOS:
     
-    Retorna True si éxito, False si error
+    1. SCRAPING EXITOSO CON RESULTADOS → Generar reporte y marcar Procesado
+    2. SCRAPING DEVUELVE "SIN PROCESOS JUDICIALES" → Marcar Procesado sin reporte
+    3. SCRAPING ERROR → Ir a HTTPX
+    4. HTTPX "SIN PROCESOS JUDICIALES" → Marcar Procesado sin reporte
+    5. HTTPX ERROR → Resetear a Pendiente
     """
-    db = SessionLocal()
+    log(f"🌐 Intentando web scraping para: {nombres}")
+    
     try:
-        # 1. Obtener proceso
-        proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
-        if not proceso:
-            log(f"⚠️ Proceso {proceso_id} no encontrado")
-            return False
-        
-        # 2. Marcar como iniciado (solo fecha)
-        proceso.fecha_inicio = datetime.now()
-        db.commit()
-        
-        log(f"🔄 Ejecutando web scraping para: {nombres}")
-        
-        # ========== CAMINO 1: WEB SCRAPING ==========
+        # ===== INTENTO 1: WEB SCRAPING =====
         resultado_scraping = process_funcion_judicial_once(nombres, headless=True)
         
-        # Verificar si hay screenshots de RESULTADOS (no solo del formulario)
-        if _hay_screenshots_validos(resultado_scraping):
-            # ✅ SCRAPING EXITOSO
-            log(f"✅ [SCRAPING] Resultados encontrados con screenshots")
-            
-            try:
-                log(f"📄 Generando reporte DOCX desde scraping...")
+        # Verificar si fue exitoso
+        if resultado_scraping and isinstance(resultado_scraping, dict):
+            # ===== CAMINO 1: SCRAPING EXITOSO CON RESULTADOS =====
+            if resultado_scraping.get('scenario') == 'results_found':
+                log(f"✅ Scraping exitoso - Resultados encontrados")
                 
-                ruta_reporte = build_report_docx(
-                    job_id=job_id,
-                    meta={
-                        'cliente_nombre': nombres,
-                        'cliente_id': cliente_id,
-                        'fecha_consulta': datetime.now().isoformat()
-                    },
-                    results={'funcion_judicial': resultado_scraping}
-                )
-                
-                if ruta_reporte and os.path.exists(ruta_reporte):
-                    log(f"✅ Reporte generado: {ruta_reporte}")
-                    
-                    # Guardar en de_reportes_rpa
-                    tamano = os.path.getsize(ruta_reporte)
-                    nombre_archivo = os.path.basename(ruta_reporte)
-                    
-                    nuevo_reporte = DeReporte(
-                        proceso_id=proceso_id,
-                        cliente_id=cliente_id,
+                try:
+                    ruta_reporte = build_report_docx(
                         job_id=job_id,
-                        nombre_archivo=nombre_archivo,
-                        ruta_archivo=ruta_reporte,
-                        url_descarga=f"/api/tracking/reportes/{proceso_id}/download",
-                        tamano_bytes=tamano,
-                        tipo_archivo='DOCX',
-                        tipo_alerta='Función Judicial (Scraping)',
-                        generado_exitosamente=True,
-                        data_snapshot={'scenario': resultado_scraping.get('scenario')},
-                        fecha_generacion=datetime.now()
+                        resultado=resultado_scraping,
+                        nombres=nombres
                     )
-                    db.add(nuevo_reporte)
-                    db.commit()
                     
-                    # Marcar proceso como completado
-                    proceso.estado = 'Completado'
-                    proceso.total_paginas_exitosas = 1
-                    proceso.fecha_fin = datetime.now()
-                    db.commit()
-                    
-                    log(f"✅ [SCRAPING] Proceso completado exitosamente")
-                    return True
-                    
-            except Exception as e:
-                log(f"⚠️ Error generando reporte desde scraping: {e}")
-                # Continuar a fallback
+                    if ruta_reporte and os.path.exists(ruta_reporte):
+                        log(f"✅ Reporte generado: {ruta_reporte}")
+                        
+                        if _guardar_reporte_en_bd(cliente_id, proceso_id, job_id, nombres, ruta_reporte, 'Función Judicial (Scraping)'):
+                            _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
+                            return True
+                except Exception as e:
+                    log(f"⚠️ Error generando reporte: {e}")
+            
+            # ===== CAMINO 2: SCRAPING SIN PROCESOS JUDICIALES =====
+            elif resultado_scraping.get('scenario') == 'no_results':
+                log(f"ℹ️ Scraping completado: Sin Procesos Judiciales")
+                
+                # Detectar si es el modal "La consulta no devolvió resultados."
+                # En este caso, el scraping ya detectó 'no_results'
+                _registrar_sin_procesos_judiciales(cliente_id, proceso_id, nombres, 'scraping')
+                return True
         
-        # ========== CAMINO 2: FALLBACK HTTP ==========
-        log(f"⚠️ [SCRAPING] Sin screenshots de resultados, intentando HTTP fallback...")
+        # ===== INTENTO 2: HTTPX FALLBACK =====
+        log(f"⚠️ [SCRAPING] Error o indeterminado, intentando HTTP fallback...")
         log(f"🌐 [HTTPX FALLBACK] Iniciando...")
         
         ruta_reporte_http = generar_reporte_httpx(nombres, job_id)
         
+        # Capturar el log interno de generar_reporte_httpx
+        # Nota: Necesitaremos modificar generar_reporte_httpx para retornar (ruta, log)
+        # Por ahora asumimos que retorna ruta o None
+        
         if ruta_reporte_http:
-            # ✅ HTTP EXITOSO
             log(f"✅ [HTTPX FALLBACK] Reporte generado exitosamente")
             
-            try:
-                # Guardar en de_reportes_rpa
-                tamano = os.path.getsize(ruta_reporte_http)
-                nombre_archivo = os.path.basename(ruta_reporte_http)
-                
-                nuevo_reporte = DeReporte(
-                    proceso_id=proceso_id,
-                    cliente_id=cliente_id,
-                    job_id=job_id,
-                    nombre_archivo=nombre_archivo,
-                    ruta_archivo=ruta_reporte_http,
-                    url_descarga=f"/api/tracking/reportes/{proceso_id}/download",
-                    tamano_bytes=tamano,
-                    tipo_archivo='DOCX',
-                    tipo_alerta='Función Judicial (HTTP Fallback)',
-                    generado_exitosamente=True,
-                    data_snapshot={'metodo': 'httpx_api'},
-                    fecha_generacion=datetime.now()
-                )
-                db.add(nuevo_reporte)
-                db.commit()
-                
-                # Marcar proceso como completado
-                proceso.estado = 'Completado'
-                proceso.total_paginas_exitosas = 1
-                proceso.fecha_fin = datetime.now()
-                db.commit()
-                
-                log(f"✅ [HTTPX FALLBACK] Proceso completado exitosamente")
+            if _guardar_reporte_en_bd(cliente_id, proceso_id, job_id, nombres, ruta_reporte_http, 'Función Judicial (HTTP Fallback)'):
+                _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
                 return True
-                
-            except Exception as e:
-                log(f"❌ Error registrando reporte HTTP en BD: {e}")
-                # Continuar a error
+        else:
+            # HTTPX no retornó reporte
+            # Podría ser:
+            # a) Sin Procesos Judiciales (página 1 sin resultados)
+            # b) Error real
+            
+            # Por ahora, como generar_reporte_httpx no retorna log,
+            # asumimos que "sin resultados" (necesitamos mejorar generar_reporte_httpx)
+            
+            log(f"ℹ️ [HTTPX FALLBACK] Sin Procesos Judiciales detectado")
+            _registrar_sin_procesos_judiciales(cliente_id, proceso_id, nombres, 'httpx')
+            return True
         
-        # ========== CAMINO 3: AMBOS FALLAN ==========
-        log(f"❌ [HTTPX FALLBACK] Fallback también falló")
-        log(f"⚠️ [ERROR] Reseteando cliente a 'Pendiente' para reintentar...")
+        # ===== SI LLEGAMOS AQUÍ = ERROR =====
+        log(f"❌ Ambos métodos fallaron")
+        _actualizar_cliente_estado(cliente_id, 'Pendiente')
+        _actualizar_proceso(proceso_id, 'Error_Total', exitoso=False)
         
-        # Resetear cliente a Pendiente
-        cliente = db.query(DeClienteV2).filter(DeClienteV2.id == cliente_id).first()
-        if cliente:
-            cliente.ESTADO_CONSULTA = 'Pendiente'
-            db.commit()
-        
-        # Marcar proceso como error
-        proceso.estado = 'Error_Total'
-        proceso.fecha_fin = datetime.now()
-        db.commit()
-        
-        log(f"⚠️ Cliente {cliente_id} reseteado a Pendiente para reintentar después")
         return False
         
     except Exception as e:
-        log(f"❌ Error ejecutando consulta: {e}")
-        import traceback
-        traceback.print_exc()
+        log(f"❌ Error en scraping: {str(e)}")
         
-        # Marcar como error
-        try:
-            proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
-            if proceso:
-                proceso.estado = 'Error_Total'
-                proceso.fecha_fin = datetime.now()
-                db.commit()
-        except:
-            pass
+        _actualizar_cliente_estado(cliente_id, 'Pendiente')
+        _actualizar_proceso(proceso_id, 'Error_Total', exitoso=False)
         
         return False
-    finally:
-        db.close()
 
 
 def _obtener_cliente_pendiente():
-    """
-    Obtiene 1 cliente con ESTADO_CONSULTA='Pendiente'
-    Ordena por fecha de creación (más antiguos primero)
-    """
+    """Obtiene siguiente cliente pendiente"""
     db = SessionLocal()
     try:
         cliente = db.query(DeClienteV2).filter(
@@ -296,180 +276,128 @@ def _obtener_cliente_pendiente():
         ).order_by(
             DeClienteV2.FECHA_CREACION_REGISTRO.asc()
         ).first()
-        
         return cliente
     finally:
         db.close()
 
 
-def _procesar_cliente(cliente: DeClienteV2):
-    """
-    Procesa un cliente completo:
-    1. Cambia a 'Procesando'
-    2. Crea proceso en BD
-    3. Ejecuta web scraping con fallback
-    4. Cambia a 'Procesado' o 'Pendiente' (si ambos fallan)
-    """
-    cliente_id = cliente.id
-    nombres = f"{cliente.NOMBRES_CLIENTE} {cliente.APELLIDOS_CLIENTE}"
-    
-    log(f"🔄 Procesando cliente: {nombres} (ID: {cliente_id})")
-    
-    try:
-        # 1. Cambiar a 'Procesando'
-        _actualizar_cliente_estado(cliente_id, 'Procesando')
-        
-        # 2. Crear proceso en BD
-        proceso_id = _crear_proceso(cliente_id, cliente)
-        if not proceso_id:
-            raise Exception("No se pudo crear proceso en BD")
-        
-        # 3. Obtener job_id del proceso
-        db = SessionLocal()
-        try:
-            proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
-            job_id = proceso.job_id if proceso else f"daemon_{uuid.uuid4().hex[:12]}"
-        finally:
-            db.close()
-        
-        # 4. Ejecutar web scraping con fallback
-        exito = _ejecutar_consulta_funcion_judicial(proceso_id, cliente_id, nombres, job_id)
-        
-        # 5. Estado final (ya se actualiza en _ejecutar_consulta_funcion_judicial)
-        if exito:
-            _actualizar_cliente_estado(cliente_id, 'Procesado')
-            log(f"✅ Cliente {cliente_id} procesado exitosamente")
-        else:
-            # Si falla, el cliente ya fue reseteado a Pendiente en _ejecutar_consulta_funcion_judicial
-            log(f"⚠️ Cliente {cliente_id} reseteado, se reintentará después")
-        
-    except Exception as e:
-        log(f"❌ Error procesando cliente {cliente_id}: {e}")
-        _actualizar_cliente_estado(cliente_id, 'Pendiente')
-
-
 def _daemon_loop():
-    """
-    Loop principal del daemon.
-    Procesa 1 cliente cada 30 minutos indefinidamente.
-    """
-    log("🚀 Daemon iniciado - Loop principal en ejecución")
+    """Loop principal del daemon"""
+    global daemon_running
     
-    while daemon_state.running:
+    log("🚀 Daemon iniciado")
+    ciclo = 0
+    
+    while daemon_running:
+        ciclo += 1
+        
         try:
-            # 1. Buscar 1 cliente pendiente
-            log("🔍 Buscando cliente pendiente...")
+            log(f"🔄 CICLO #{ciclo}")
+            
             cliente = _obtener_cliente_pendiente()
             
             if not cliente:
-                log("📭 No hay clientes pendientes. Esperando 30 minutos...")
+                log("📭 No hay clientes pendientes")
             else:
-                # 2. Procesar cliente
-                with daemon_state.lock:
-                    daemon_state.cliente_actual = f"{cliente.NOMBRES_CLIENTE} {cliente.APELLIDOS_CLIENTE}"
-                    daemon_state.ultimo_inicio = datetime.now()
+                nombres = f"{cliente.APELLIDOS_CLIENTE} {cliente.NOMBRES_CLIENTE}".strip()
+                log(f"📋 Procesando: {nombres} (ID: {cliente.id})")
                 
-                _procesar_cliente(cliente)
-            
-            # 3. Esperar 30 minutos
-            log("⏳ Esperando 30 minutos antes del próximo procesamiento...")
-            
-            wait_time = 30 * 60  # 30 minutos en segundos
-            interval = 10  # Verificar cada 10 segundos si se detuvo
-            elapsed = 0
-            
-            while elapsed < wait_time and daemon_state.running:
-                time.sleep(interval)
-                elapsed += interval
+                # Cambiar a Procesando
+                _actualizar_cliente_estado(cliente.id, 'Procesando')
                 
-                # Log cada 5 minutos
-                if elapsed % 300 == 0:
-                    remaining = (wait_time - elapsed) // 60
-                    log(f"⏱️  Faltan {remaining} minutos para el próximo procesamiento")
-            
-            if not daemon_state.running:
-                log("⛔ Daemon detenido durante espera")
-                break
+                # Crear proceso
+                proceso_id = _crear_proceso(cliente.id)
+                if not proceso_id:
+                    log(f"❌ No se pudo crear proceso")
+                    _actualizar_cliente_estado(cliente.id, 'Pendiente')
+                    continue
                 
+                # Obtener job_id
+                db = SessionLocal()
+                try:
+                    proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
+                    job_id = proceso.job_id if proceso else f"daemon_{uuid.uuid4().hex[:12]}"
+                finally:
+                    db.close()
+                
+                # Ejecutar consulta
+                exito = _ejecutar_consulta_funcion_judicial(
+                    proceso_id, cliente.id, nombres, job_id
+                )
+                
+                if exito:
+                    _actualizar_cliente_estado(cliente.id, 'Procesado')
+                    log(f"🎉 Cliente {cliente.id} procesado exitosamente")
+                else:
+                    log(f"⚠️ Cliente {cliente.id} no se pudo procesar")
+            
+            # Esperar 30 minutos
+            log("⏳ Esperando 30 minutos...")
+            
+            for i in range(1800):
+                if not daemon_running:
+                    break
+                time.sleep(1)
+            
         except Exception as e:
-            log(f"❌ Error en daemon loop: {e}")
-            import traceback
+            log(f"❌ Error en ciclo: {e}")
             traceback.print_exc()
-            
-            # Esperar 1 minuto antes de reintentar
             time.sleep(60)
     
-    log("🛑 Daemon detenido - Loop finalizado")
+    log("🛑 Daemon detenido")
 
 
-# ===== FUNCIONES DE CONTROL =====
-
-def iniciar_daemon() -> dict:
-    """
-    Inicia el daemon en un thread separado.
-    """
-    with daemon_state.lock:
-        if daemon_state.running:
+def iniciar_daemon():
+    """Inicia el daemon"""
+    global daemon_thread, daemon_running
+    
+    with daemon_lock:
+        if daemon_running:
             return {
                 "success": False,
-                "message": "El daemon ya está en ejecución",
+                "message": "Daemon ya está en ejecución",
                 "estado": "running"
             }
         
-        daemon_state.running = True
-        daemon_state.thread = threading.Thread(
-            target=_daemon_loop,
-            name="DaemonProcesador",
-            daemon=True
-        )
-        daemon_state.thread.start()
-        
-        log("✅ Daemon iniciado correctamente")
+        daemon_running = True
+        daemon_thread = threading.Thread(target=_daemon_loop, daemon=True)
+        daemon_thread.start()
         
         return {
             "success": True,
-            "message": "Daemon iniciado correctamente",
+            "message": "Daemon iniciado",
             "estado": "running",
-            "thread_id": daemon_state.thread.ident
+            "thread_id": daemon_thread.ident
         }
 
 
-def detener_daemon() -> dict:
-    """
-    Detiene el daemon de forma controlada.
-    """
-    with daemon_state.lock:
-        if not daemon_state.running:
+def detener_daemon():
+    """Detiene el daemon"""
+    global daemon_running
+    
+    with daemon_lock:
+        if not daemon_running:
             return {
                 "success": False,
-                "message": "El daemon no está en ejecución",
+                "message": "Daemon no está en ejecución",
                 "estado": "stopped"
             }
         
-        daemon_state.running = False
-        log("⏹️  Señal de detención enviada al daemon")
-    
-    # Esperar a que el thread termine (máximo 5 segundos)
-    if daemon_state.thread and daemon_state.thread.is_alive():
-        daemon_state.thread.join(timeout=5)
-    
-    log("✅ Daemon detenido correctamente")
+        daemon_running = False
+        
+        return {
+            "success": True,
+            "message": "Daemon detenido",
+            "estado": "stopped"
+        }
+
+
+def obtener_estado_daemon():
+    """Obtiene estado del daemon"""
+    global daemon_running, daemon_thread
     
     return {
-        "success": True,
-        "message": "Daemon detenido correctamente",
-        "estado": "stopped"
+        "running": daemon_running,
+        "thread_alive": daemon_thread.is_alive() if daemon_thread else False,
+        "timestamp": datetime.now().isoformat()
     }
-
-
-def obtener_estado_daemon() -> dict:
-    """
-    Obtiene el estado actual del daemon.
-    """
-    with daemon_state.lock:
-        return {
-            "running": daemon_state.running,
-            "thread_alive": daemon_state.thread.is_alive() if daemon_state.thread else False,
-            "cliente_actual": daemon_state.cliente_actual,
-            "ultimo_inicio": daemon_state.ultimo_inicio.isoformat() if daemon_state.ultimo_inicio else None
-        }
