@@ -1,6 +1,7 @@
-# app/services/tracking_professional.py
+# app/services/tracking_professional.py - VERSIÓN FINAL COMPLETA
+# Estados válidos en BD: 'Pendiente', 'Procesando', 'Procesado', 'Error'
 """
-Servicio profesional de tracking que usa la infraestructura existente.
+Servicio profesional de tracking actualizado para usar de_clientes_rpa_v2
 """
 
 from typing import List, Dict, Any, Optional
@@ -9,8 +10,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc
 
 from app.db import SessionLocal
+from app.db.models import DeClienteV2  # ✅ NUEVA TABLA
 from app.db.models_new import (
-    DeCliente, DeProceso, DeConsulta, DePagina, DeReporte
+    DeProceso, DeConsulta, DePagina, DeReporte
 )
 
 def get_db_session() -> Session:
@@ -50,124 +52,139 @@ def get_clientes_with_filters(
     q: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    Obtiene clientes con filtros opcionales.
-    Incluye información del proceso activo si existe.
+    Obtiene clientes de de_clientes_rpa_v2 con filtros opcionales.
+    Retorna los campos relevantes para el frontend.
+    
+    Estados válidos en BD: 'Pendiente', 'Procesando', 'Procesado', 'Error'
+    
+    Filtros:
+    - estado: filtra por ESTADO_CONSULTA
+    - fecha_desde/hasta: filtra por FECHA_CREACION_SOLICITUD
+    - q: búsqueda en NOMBRES_CLIENTE, APELLIDOS_CLIENTE, CEDULA
     """
     db = get_db_session()
     try:
-        query = db.query(DeCliente)
+        query = db.query(DeClienteV2)
         
-        # Aplicar filtros
+        # Filtrar por ESTADO_CONSULTA
         if estado and estado != "Todos":
-            query = query.filter(DeCliente.estado == estado)
+            # Mapear alias de estados para compatibilidad
+            estado_bd = estado
+            if estado == "En_Proceso":
+                estado_bd = "Procesando"
+            
+            query = query.filter(DeClienteV2.ESTADO_CONSULTA == estado_bd)
         
+        # Filtrar por rango de fechas
         if fecha_desde:
             try:
                 fecha_desde_dt = datetime.strptime(fecha_desde, "%Y-%m-%d").date()
-                query = query.filter(DeCliente.fecha_creacion >= fecha_desde_dt)
+                query = query.filter(DeClienteV2.FECHA_CREACION_SOLICITUD >= fecha_desde_dt)
             except ValueError:
                 pass  # Ignorar fecha inválida
         
         if fecha_hasta:
             try:
                 fecha_hasta_dt = datetime.strptime(fecha_hasta, "%Y-%m-%d").date()
-                query = query.filter(DeCliente.fecha_creacion <= fecha_hasta_dt)
+                query = query.filter(DeClienteV2.FECHA_CREACION_SOLICITUD <= fecha_hasta_dt)
             except ValueError:
                 pass  # Ignorar fecha inválida
         
+        # Búsqueda por nombre, apellido, CI
         if q and q.strip():
             search_term = f"%{q.strip()}%"
             query = query.filter(
                 or_(
-                    DeCliente.nombre.ilike(search_term),
-                    DeCliente.apellido.ilike(search_term),
-                    DeCliente.ci.ilike(search_term),
-                    DeCliente.ruc.ilike(search_term)
+                    DeClienteV2.NOMBRES_CLIENTE.ilike(search_term),
+                    DeClienteV2.APELLIDOS_CLIENTE.ilike(search_term),
+                    DeClienteV2.CEDULA.ilike(search_term)
                 )
             )
         
-        query = query.order_by(desc(DeCliente.fecha_creacion))
+        # Ordenar por fecha de creación descendente
+        query = query.order_by(DeClienteV2.FECHA_CREACION_REGISTRO.desc())
+        
         clientes = query.all()
         
-        # Enriquecer con información de procesos activos
+        # Convertir a diccionarios con los campos que necesita el frontend
         resultado = []
         for cliente in clientes:
-            # Buscar proceso más reciente
-            proceso_activo = db.query(DeProceso).filter(
-                DeProceso.cliente_id == cliente.id
-            ).order_by(desc(DeProceso.fecha_creacion)).first()
-            
-            proceso_info = None
-            if proceso_activo:
-                proceso_info = {
-                    "proceso_id": proceso_activo.id,
-                    "job_id": proceso_activo.job_id,
-                    "estado": proceso_activo.estado,
-                    "fecha_inicio": proceso_activo.fecha_inicio.isoformat() if proceso_activo.fecha_inicio else None,
-                    "fecha_fin": proceso_activo.fecha_fin.isoformat() if proceso_activo.fecha_fin else None,
-                    "total_paginas_solicitadas": proceso_activo.total_paginas_solicitadas,
-                    "total_paginas_exitosas": proceso_activo.total_paginas_exitosas,
-                    "total_paginas_fallidas": proceso_activo.total_paginas_fallidas
-                }
+            # Convertir ESTADO_CONSULTA 'Procesando' a 'En_Proceso' para el frontend
+            estado_frontend = cliente.ESTADO_CONSULTA
+            if estado_frontend == "Procesando":
+                estado_frontend = "En_Proceso"
             
             resultado.append({
                 "id": cliente.id,
-                "nombre": cliente.nombre,
-                "apellido": cliente.apellido,
-                "ci": cliente.ci,
-                "ruc": cliente.ruc,
-                "tipo": cliente.tipo,
-                "monto": float(cliente.monto) if cliente.monto else None,
-                "fecha": cliente.fecha.isoformat() if cliente.fecha else None,
-                "estado": cliente.estado,
-                "fecha_creacion": cliente.fecha_creacion.isoformat(),
-                "proceso_activo": proceso_info
+                "ID_SOLICITUD": cliente.ID_SOLICITUD,
+                "ESTADO": cliente.ESTADO,
+                "AGENCIA": cliente.AGENCIA,
+                "CEDULA": cliente.CEDULA,
+                "NOMBRES_CLIENTE": cliente.NOMBRES_CLIENTE,
+                "APELLIDOS_CLIENTE": cliente.APELLIDOS_CLIENTE,
+                "ESTADO_CONSULTA": estado_frontend,  # Convertido para frontend
+                "FECHA_CREACION_SOLICITUD": cliente.FECHA_CREACION_SOLICITUD.isoformat() if cliente.FECHA_CREACION_SOLICITUD else None,
+                "FECHA_CREACION_REGISTRO": cliente.FECHA_CREACION_REGISTRO.isoformat() if cliente.FECHA_CREACION_REGISTRO else None,
+                # Campos adicionales opcionales para compatibilidad
+                "ID_PRODUCTO": cliente.ID_PRODUCTO,
+                "PRODUCTO": cliente.PRODUCTO,
+                "ESTADO_CIVIL": cliente.ESTADO_CIVIL
             })
         
         return resultado
+        
     finally:
         db.close()
 
-def update_cliente_estado(cliente_id: int, estado: str, mensaje_error: Optional[str] = None) -> bool:
+def update_cliente_estado(
+    cliente_id: int,
+    estado: str,
+    mensaje_error: Optional[str] = None
+) -> bool:
     """
-    Actualiza el estado de un cliente específico.
-    Retorna True si fue exitoso, False si no se encontró el cliente.
+    Actualiza el ESTADO_CONSULTA de un cliente en de_clientes_rpa_v2.
+    
+    Estados válidos en BD: 'Pendiente', 'Procesando', 'Procesado', 'Error'
+    El frontend puede enviar 'En_Proceso' que se convierte a 'Procesando'
+    
+    Retorna True si se actualizó exitosamente, False si no se encontró el cliente.
     """
     db = get_db_session()
     try:
-        cliente = db.query(DeCliente).filter(DeCliente.id == cliente_id).first()
+        cliente = db.query(DeClienteV2).filter(DeClienteV2.id == cliente_id).first()
+        
         if not cliente:
             return False
         
-        cliente.estado = estado
+        # Convertir alias de estados para BD
+        estado_bd = estado
+        if estado == "En_Proceso":
+            estado_bd = "Procesando"
         
-        # Si hay mensaje de error, buscar el proceso más reciente y actualizarlo
-        if mensaje_error:
-            proceso_reciente = db.query(DeProceso).filter(
-                DeProceso.cliente_id == cliente_id
-            ).order_by(desc(DeProceso.fecha_creacion)).first()
-            
-            if proceso_reciente:
-                proceso_reciente.mensaje_error_general = mensaje_error
-        
+        cliente.ESTADO_CONSULTA = estado_bd
         db.commit()
+        
         return True
+        
     except Exception as e:
         db.rollback()
-        print(f"❌ Error actualizando cliente {cliente_id}: {str(e)}")
-        return False
+        raise e
     finally:
         db.close()
 
-def validar_datos_cliente_para_paginas(cliente_id: int, paginas_codigos: List[str]) -> List[str]:
+def validar_datos_cliente_para_paginas(
+    cliente_id: int,
+    paginas_codigos: List[str]
+) -> List[str]:
     """
-    Valida que un cliente tenga los datos necesarios para las páginas seleccionadas.
+    Valida que el cliente tenga los datos necesarios para consultar las páginas especificadas.
+    
     Retorna lista de errores (vacía si todo está bien).
     """
     db = get_db_session()
     try:
         # Obtener cliente
-        cliente = db.query(DeCliente).filter(DeCliente.id == cliente_id).first()
+        cliente = db.query(DeClienteV2).filter(DeClienteV2.id == cliente_id).first()
         if not cliente:
             return ["Cliente no encontrado"]
         
@@ -189,21 +206,21 @@ def validar_datos_cliente_para_paginas(cliente_id: int, paginas_codigos: List[st
             codigo = pagina.codigo
             
             # Mapeo de validaciones por página
-            if codigo in ['ruc', 'deudas', 'mercado_valores']:
-                if not cliente.ruc or len(cliente.ruc) != 13 or not cliente.ruc.isdigit():
-                    errores.append(f"{pagina.nombre} requiere RUC válido (13 dígitos)")
+            if codigo in ['ruc']:
+                # RUC no está en V2, saltar
+                pass
             
-            elif codigo in ['contraloria', 'supercias_persona', 'predio_quito', 'predio_manta']:
-                if not cliente.ci or len(cliente.ci) != 10 or not cliente.ci.isdigit():
+            elif codigo in ['deudas', 'mercado_valores', 'supercias_persona']:
+                if not cliente.CEDULA or len(str(cliente.CEDULA)) != 10:
+                    errores.append(f"{pagina.nombre} requiere CI válida (10 dígitos)")
+            
+            elif codigo in ['contraloria', 'predio_quito', 'predio_manta', 'interpol']:
+                if not cliente.CEDULA or len(str(cliente.CEDULA)) != 10:
                     errores.append(f"{pagina.nombre} requiere CI válida (10 dígitos)")
             
             elif codigo in ['denuncias', 'google']:
-                if not cliente.nombre or not cliente.apellido:
+                if not cliente.NOMBRES_CLIENTE or not cliente.APELLIDOS_CLIENTE:
                     errores.append(f"{pagina.nombre} requiere nombre y apellido completos")
-            
-            elif codigo == 'interpol':
-                if not cliente.apellido:
-                    errores.append(f"{pagina.nombre} requiere apellido")
         
         return errores
     finally:
@@ -223,7 +240,7 @@ def crear_proceso_completo(
     db = get_db_session()
     try:
         # 1. Validar que el cliente existe
-        cliente = db.query(DeCliente).filter(DeCliente.id == cliente_id).first()
+        cliente = db.query(DeClienteV2).filter(DeClienteV2.id == cliente_id).first()
         if not cliente:
             raise ValueError("Cliente no encontrado")
         
@@ -232,231 +249,150 @@ def crear_proceso_completo(
         if errores:
             raise ValueError(f"Datos insuficientes: {'; '.join(errores)}")
         
-        # 3. Obtener páginas válidas
-        paginas = db.query(DePagina).filter(
-            DePagina.codigo.in_(paginas_codigos),
-            DePagina.activa == True
-        ).all()
-        
-        if len(paginas) != len(paginas_codigos):
-            raise ValueError("Una o más páginas no están disponibles")
-        
-        # 4. Crear proceso principal
-        nuevo_proceso = DeProceso(
+        # 3. Crear proceso
+        proceso = DeProceso(
             cliente_id=cliente_id,
             job_id=job_id,
-            tipo_alerta=cliente.tipo,
-            monto_usd=cliente.monto,
-            fecha_alerta=cliente.fecha,
             estado='Pendiente',
             fecha_creacion=datetime.now(),
             headless=headless,
             generate_report=generate_report,
-            total_paginas_solicitadas=len(paginas_codigos),
-            total_paginas_exitosas=0,
-            total_paginas_fallidas=0
+            total_paginas_solicitadas=len(paginas_codigos)
         )
         
-        db.add(nuevo_proceso)
-        db.flush()  # Para obtener el ID
+        db.add(proceso)
+        db.commit()
         
-        # 5. Crear consultas individuales para cada página
+        # 4. Crear consultas para cada página
+        paginas = db.query(DePagina).filter(
+            DePagina.codigo.in_(paginas_codigos)
+        ).all()
+        
         for pagina in paginas:
-            # Determinar valor a enviar según la página
-            valor_enviar = _obtener_valor_para_pagina(cliente, pagina.codigo)
-            
-            nueva_consulta = DeConsulta(
-                proceso_id=nuevo_proceso.id,
+            consulta = DeConsulta(
+                proceso_id=proceso.id,
                 pagina_id=pagina.id,
-                valor_enviado=valor_enviar,
                 estado='Pendiente',
-                intentos_realizados=0,
-                max_intentos=2
+                fecha_creacion=datetime.now()
             )
-            db.add(nueva_consulta)
-        
-        # 6. Actualizar estado del cliente a 'Procesando'
-        cliente.estado = 'Procesando'
+            db.add(consulta)
         
         db.commit()
         
-        print(f"✅ Proceso creado: ID {nuevo_proceso.id}, Job {job_id}")
-        return nuevo_proceso.id
+        return proceso.id
         
     except Exception as e:
         db.rollback()
-        print(f"❌ Error creando proceso: {str(e)}")
-        raise
+        raise e
     finally:
         db.close()
 
-def _obtener_valor_para_pagina(cliente: DeCliente, codigo_pagina: str) -> Optional[str]:
+def get_estadisticas(
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Obtiene el valor apropiado para enviar a cada página según el tipo.
+    Obtiene estadísticas del sistema.
     """
-    mapeo_valores = {
-        'ruc': cliente.ruc,
-        'deudas': cliente.ruc,
-        'mercado_valores': cliente.ruc,
-        'denuncias': f"{cliente.nombre} {cliente.apellido}".strip(),
-        'interpol': cliente.apellido,
-        'google': f"{cliente.nombre} {cliente.apellido}".strip(),
-        'contraloria': cliente.ci,
-        'supercias_persona': cliente.ci,
-        'predio_quito': cliente.ci,
-        'predio_manta': cliente.ci,
-        'funcion_judicial': f"{cliente.apellido} {cliente.nombre}".strip()
-    }
-    
-    return mapeo_valores.get(codigo_pagina)
-
-# ===== FUNCIONES PARA EL SISTEMA DE SINCRONIZACIÓN =====
+    db = get_db_session()
+    try:
+        # Parsear fechas
+        fecha_desde_dt = None
+        fecha_hasta_dt = None
+        
+        if fecha_desde:
+            try:
+                fecha_desde_dt = datetime.strptime(fecha_desde, "%Y-%m-%d")
+            except ValueError:
+                pass
+        
+        if fecha_hasta:
+            try:
+                fecha_hasta_dt = datetime.strptime(fecha_hasta, "%Y-%m-%d")
+            except ValueError:
+                pass
+        
+        # Construir filtros
+        filtro_fecha_clientes = True
+        if fecha_desde_dt:
+            filtro_fecha_clientes = and_(filtro_fecha_clientes, DeClienteV2.FECHA_CREACION_SOLICITUD >= fecha_desde_dt.date())
+        if fecha_hasta_dt:
+            filtro_fecha_clientes = and_(filtro_fecha_clientes, DeClienteV2.FECHA_CREACION_SOLICITUD <= fecha_hasta_dt.date())
+        
+        # Estadísticas de clientes V2
+        total_clientes = db.query(DeClienteV2).filter(filtro_fecha_clientes).count()
+        clientes_pendientes = db.query(DeClienteV2).filter(
+            and_(filtro_fecha_clientes, DeClienteV2.ESTADO_CONSULTA == 'Pendiente')
+        ).count()
+        clientes_procesando = db.query(DeClienteV2).filter(
+            and_(filtro_fecha_clientes, DeClienteV2.ESTADO_CONSULTA == 'Procesando')
+        ).count()
+        clientes_procesados = db.query(DeClienteV2).filter(
+            and_(filtro_fecha_clientes, DeClienteV2.ESTADO_CONSULTA == 'Procesado')
+        ).count()
+        clientes_error = db.query(DeClienteV2).filter(
+            and_(filtro_fecha_clientes, DeClienteV2.ESTADO_CONSULTA == 'Error')
+        ).count()
+        
+        # Estadísticas de procesos
+        filtro_fecha_procesos = True
+        if fecha_desde_dt:
+            filtro_fecha_procesos = and_(filtro_fecha_procesos, DeProceso.fecha_creacion >= fecha_desde_dt)
+        if fecha_hasta_dt:
+            filtro_fecha_procesos = and_(filtro_fecha_procesos, DeProceso.fecha_creacion <= fecha_hasta_dt)
+        
+        total_procesos = db.query(DeProceso).filter(filtro_fecha_procesos).count()
+        procesos_completados = db.query(DeProceso).filter(
+            and_(filtro_fecha_procesos, DeProceso.estado == 'Completado')
+        ).count()
+        procesos_con_errores = db.query(DeProceso).filter(
+            and_(filtro_fecha_procesos, DeProceso.estado == 'Completado_Con_Errores')
+        ).count()
+        procesos_fallidos = db.query(DeProceso).filter(
+            and_(filtro_fecha_procesos, DeProceso.estado == 'Error_Total')
+        ).count()
+        
+        return {
+            'clientes': {
+                'total': total_clientes,
+                'pendientes': clientes_pendientes,
+                'procesando': clientes_procesando,
+                'procesados': clientes_procesados,
+                'errores': clientes_error
+            },
+            'procesos': {
+                'total': total_procesos,
+                'completados': procesos_completados,
+                'con_errores': procesos_con_errores,
+                'fallidos': procesos_fallidos
+            }
+        }
+    finally:
+        db.close()
 
 def get_proceso_by_job_id(job_id: str) -> Optional[Dict[str, Any]]:
     """
-    Obtiene información de un proceso por job_id.
-    Usado por el sistema de sincronización.
+    Obtiene información de un proceso por su job_id.
+    Se usa en routers para obtener detalles del proceso.
     """
     db = get_db_session()
     try:
         proceso = db.query(DeProceso).filter(DeProceso.job_id == job_id).first()
+        
         if not proceso:
             return None
         
         return {
-            "id": proceso.id,
-            "cliente_id": proceso.cliente_id,
-            "job_id": proceso.job_id,
-            "estado": proceso.estado,
-            "fecha_inicio": proceso.fecha_inicio,
-            "fecha_fin": proceso.fecha_fin
+            'id': proceso.id,
+            'cliente_id': proceso.cliente_id,
+            'job_id': proceso.job_id,
+            'estado': proceso.estado,
+            'fecha_creacion': proceso.fecha_creacion.isoformat() if proceso.fecha_creacion else None,
+            'fecha_inicio': proceso.fecha_inicio.isoformat() if proceso.fecha_inicio else None,
+            'fecha_fin': proceso.fecha_fin.isoformat() if proceso.fecha_fin else None,
+            'total_paginas_solicitadas': proceso.total_paginas_solicitadas,
+            'total_paginas_exitosas': proceso.total_paginas_exitosas,
+            'total_paginas_fallidas': proceso.total_paginas_fallidas
         }
     finally:
         db.close()
-
-def iniciar_proceso(proceso_id: int):
-    """
-    Marca un proceso como iniciado.
-    Usado por el executor cuando comienza a ejecutar el job.
-    """
-    db = get_db_session()
-    try:
-        proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
-        if proceso:
-            proceso.estado = 'En_Proceso'
-            proceso.fecha_inicio = datetime.now()
-            db.commit()
-    finally:
-        db.close()
-
-def finalizar_proceso(proceso_id: int, exito: bool = True):
-    """
-    Marca un proceso como finalizado.
-    Usado por el executor cuando termina la ejecución.
-    """
-    db = get_db_session()
-    try:
-        proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
-        if proceso:
-            proceso.fecha_fin = datetime.now()
-            
-            if exito:
-                if proceso.total_paginas_fallidas == 0:
-                    proceso.estado = 'Completado'
-                else:
-                    proceso.estado = 'Completado_Con_Errores'
-            else:
-                proceso.estado = 'Error_Total'
-            
-            db.commit()
-    finally:
-        db.close()
-
-def actualizar_consulta_por_codigo(
-    proceso_id: int, 
-    codigo_pagina: str, 
-    estado: str, 
-    datos_capturados: Optional[Dict[str, Any]] = None,
-    mensaje_error: Optional[str] = None
-):
-    """
-    Actualiza el estado de una consulta individual por código de página.
-    Usado por el executor para reportar progreso página por página.
-    """
-    db = get_db_session()
-    try:
-        # Buscar la consulta específica
-        consulta = db.query(DeConsulta).join(DePagina).filter(
-            DeConsulta.proceso_id == proceso_id,
-            DePagina.codigo == codigo_pagina
-        ).first()
-        
-        if consulta:
-            consulta.estado = estado
-            consulta.fecha_fin = datetime.now()
-            
-            if datos_capturados:
-                consulta.datos_capturados = datos_capturados
-            
-            if mensaje_error:
-                consulta.mensaje_error = mensaje_error
-            
-            # Calcular duración si hay fecha_inicio
-            if consulta.fecha_inicio:
-                duracion = (consulta.fecha_fin - consulta.fecha_inicio).total_seconds()
-                consulta.duracion_segundos = int(duracion)
-            
-            db.commit()
-            
-            # Actualizar contadores del proceso
-            _actualizar_contadores_proceso(db, proceso_id)
-    finally:
-        db.close()
-
-def get_pagina_by_codigo(codigo: str) -> Optional[Dict[str, Any]]:
-    """
-    Obtiene información de una página por código.
-    Usado por el executor para obtener URLs dinámicas.
-    """
-    db = get_db_session()
-    try:
-        pagina = db.query(DePagina).filter(
-            DePagina.codigo == codigo,
-            DePagina.activa == True
-        ).first()
-        
-        if not pagina:
-            return None
-        
-        return {
-            "id": pagina.id,
-            "nombre": pagina.nombre,
-            "codigo": pagina.codigo,
-            "url": pagina.url,
-            "descripcion": pagina.descripcion
-        }
-    finally:
-        db.close()
-
-def _actualizar_contadores_proceso(db: Session, proceso_id: int):
-    """
-    Actualiza los contadores de páginas exitosas/fallidas de un proceso.
-    """
-    # Contar consultas exitosas
-    exitosas = db.query(DeConsulta).filter(
-        DeConsulta.proceso_id == proceso_id,
-        DeConsulta.estado == 'Exitosa'
-    ).count()
-    
-    # Contar consultas fallidas
-    fallidas = db.query(DeConsulta).filter(
-        DeConsulta.proceso_id == proceso_id,
-        DeConsulta.estado == 'Fallida'
-    ).count()
-    
-    # Actualizar proceso
-    proceso = db.query(DeProceso).filter(DeProceso.id == proceso_id).first()
-    if proceso:
-        proceso.total_paginas_exitosas = exitosas
-        proceso.total_paginas_fallidas = fallidas
-        db.commit()

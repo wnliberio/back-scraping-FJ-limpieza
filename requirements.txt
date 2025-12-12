@@ -17,3 +17,4 @@ pyodbc==5.2.0
 uvicorn
 fastapi
 apscheduler
+httpx

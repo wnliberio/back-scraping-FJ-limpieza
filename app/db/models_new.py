@@ -1,4 +1,4 @@
-# app/db/models_new.py - MODELOS PROFESIONALES PARA LA NUEVA ESTRUCTURA
+# app/db/models_new.py - LIMPIO: SOLO tablas nuevas, SIN tabla vieja
 from __future__ import annotations
 
 from typing import Optional, Dict, Any, List
@@ -6,33 +6,12 @@ from datetime import datetime, date
 
 from sqlalchemy import Integer, String, Text, Boolean, ForeignKey, JSON, DateTime, DECIMAL, BIGINT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.mysql import ENUM
 
-# 
 from app.db import Base
 
-class DeCliente(Base):
-    """Modelo para de_clientes_rpa (evolución de de_lista)"""
-    __tablename__ = "de_clientes_rpa"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    nombre: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
-    apellido: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
-    ci: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, index=True)
-    ruc: Mapped[Optional[str]] = mapped_column(String(13), nullable=True, index=True)
-    tipo: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    monto: Mapped[Optional[float]] = mapped_column(DECIMAL(10, 2), nullable=True)
-    fecha: Mapped[Optional[date]] = mapped_column(DateTime, nullable=True)
-    
-    estado: Mapped[str] = mapped_column(
-        ENUM('Pendiente', 'Procesando', 'Procesado', 'Error', name='estado_cliente_enum'),
-        nullable=False, default='Pendiente', index=True
-    )
-    fecha_creacion: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now, index=True)
+# ❌ ELIMINADA: Clase DeCliente (tabla vieja de_clientes_rpa no se usa)
 
-    # Relaciones
-    procesos: Mapped[List["DeProceso"]] = relationship("DeProceso", back_populates="cliente")
-    reportes: Mapped[List["DeReporte"]] = relationship("DeReporte", back_populates="cliente")
 
 class DePagina(Base):
     """Modelo para de_paginas_rpa (catálogo de páginas consultables)"""
@@ -50,12 +29,14 @@ class DePagina(Base):
     # Relaciones
     consultas: Mapped[List["DeConsulta"]] = relationship("DeConsulta", back_populates="pagina")
 
+
 class DeProceso(Base):
     """Modelo para de_procesos_rpa (jobs/flujos completos)"""
     __tablename__ = "de_procesos_rpa"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    cliente_id: Mapped[int] = mapped_column(Integer, ForeignKey("de_clientes_rpa.id"), nullable=False, index=True)
+    # ✅ FK apunta a de_clientes_rpa_v2 (TABLA NUEVA - SINCRONIZADA DESDE DB2)
+    cliente_id: Mapped[int] = mapped_column(Integer, ForeignKey("de_clientes_rpa_v2.id"), nullable=False, index=True)
     
     # Identificadores
     job_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, unique=True, index=True)
@@ -66,11 +47,7 @@ class DeProceso(Base):
     fecha_alerta: Mapped[Optional[date]] = mapped_column(DateTime, nullable=True)
     
     # Control de flujo
-    estado: Mapped[str] = mapped_column(
-        ENUM('Pendiente', 'En_Proceso', 'Completado', 'Completado_Con_Errores', 'Error_Total', 
-             name='estado_proceso_enum'),
-        nullable=False, default='Pendiente', index=True
-    )
+    estado: Mapped[str] = mapped_column(String(50), nullable=False, default='Pendiente', index=True)
     
     # Timestamps
     fecha_creacion: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now, index=True)
@@ -81,17 +58,17 @@ class DeProceso(Base):
     headless: Mapped[bool] = mapped_column(Boolean, default=False)
     generate_report: Mapped[bool] = mapped_column(Boolean, default=True)
     
-    # Contadores (mantenidos automáticamente por triggers)
+    # Contadores
     total_paginas_solicitadas: Mapped[int] = mapped_column(Integer, default=0)
     total_paginas_exitosas: Mapped[int] = mapped_column(Integer, default=0)
     total_paginas_fallidas: Mapped[int] = mapped_column(Integer, default=0)
     
     mensaje_error_general: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Relaciones
-    cliente: Mapped["DeCliente"] = relationship("DeCliente", back_populates="procesos")
+    # ✅ Relaciones (SOLO con tablas nuevas)
     consultas: Mapped[List["DeConsulta"]] = relationship("DeConsulta", back_populates="proceso", cascade="all, delete-orphan")
     reportes: Mapped[List["DeReporte"]] = relationship("DeReporte", back_populates="proceso")
+
 
 class DeConsulta(Base):
     """Modelo para de_consultas_rpa (consultas individuales por página)"""
@@ -106,10 +83,7 @@ class DeConsulta(Base):
     parametros_extra: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     
     # Estado individual
-    estado: Mapped[str] = mapped_column(
-        ENUM('Pendiente', 'En_Proceso', 'Exitosa', 'Fallida', name='estado_consulta_enum'),
-        nullable=False, default='Pendiente', index=True
-    )
+    estado: Mapped[str] = mapped_column(String(50), nullable=False, default='Pendiente', index=True)
     
     # Resultados
     screenshot_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
@@ -131,13 +105,15 @@ class DeConsulta(Base):
     proceso: Mapped["DeProceso"] = relationship("DeProceso", back_populates="consultas")
     pagina: Mapped["DePagina"] = relationship("DePagina", back_populates="consultas")
 
+
 class DeReporte(Base):
     """Modelo para de_reportes_rpa (reportes generados)"""
     __tablename__ = "de_reportes_rpa"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     proceso_id: Mapped[int] = mapped_column(Integer, ForeignKey("de_procesos_rpa.id"), nullable=False, index=True)
-    cliente_id: Mapped[int] = mapped_column(Integer, ForeignKey("de_clientes_rpa.id"), nullable=False, index=True)
+    # ✅ FK apunta a de_clientes_rpa_v2 (TABLA NUEVA - SINCRONIZADA DESDE DB2)
+    cliente_id: Mapped[int] = mapped_column(Integer, ForeignKey("de_clientes_rpa_v2.id"), nullable=False, index=True)
     
     # Metadatos del proceso
     tipo_alerta: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
@@ -153,10 +129,7 @@ class DeReporte(Base):
     checksum_archivo: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     
     # Metadatos del archivo
-    tipo_archivo: Mapped[str] = mapped_column(
-        ENUM('PDF', 'DOCX', 'HTML', name='tipo_archivo_enum'),
-        nullable=False, default='DOCX', index=True
-    )
+    tipo_archivo: Mapped[str] = mapped_column(String(50), nullable=False, default='DOCX', index=True)
     generado_exitosamente: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Datos
@@ -166,6 +139,5 @@ class DeReporte(Base):
     tiempo_generacion_segundos: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     fecha_generacion: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now, index=True)
 
-    # Relaciones
+    # ✅ Relaciones (SOLO con tablas nuevas)
     proceso: Mapped["DeProceso"] = relationship("DeProceso", back_populates="reportes")
-    cliente: Mapped["DeCliente"] = relationship("DeCliente", back_populates="reportes")

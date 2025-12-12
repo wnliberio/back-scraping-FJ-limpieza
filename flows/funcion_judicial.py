@@ -26,7 +26,8 @@ from core.human import (
     move_mouse_bezier_curve,
     human_type_advanced,
     human_click_element,
-    human_click_offset
+    human_click_offset,
+    wait_random 
 )
 from core.capsolver import resolver_recaptcha_si_necesario  # NUEVO
 from core.config import MAX_RETRIES

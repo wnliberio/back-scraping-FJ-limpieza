@@ -1,4 +1,4 @@
-# app/routers/daemon.py
+# app/routers/daemon.py - VERSIÓN LIMPIA SIN DEPENDENCIAS INNECESARIAS
 """
 Endpoints para controlar el daemon procesador automático.
 Permite iniciar, detener y consultar el estado del daemon.
@@ -19,19 +19,22 @@ router = APIRouter(prefix="/daemon", tags=["daemon"])
 @router.post("/iniciar", summary="Iniciar daemon procesador")
 def endpoint_iniciar_daemon() -> Dict[str, Any]:
     """
-    Inicia el daemon que procesa automáticamente clientes pendientes.
+    Inicia el daemon que procesa automáticamente clientes pendientes de de_clientes_rpa_v2.
     
     El daemon:
-    - Busca hasta 5 clientes en estado 'Pendiente'
-    - Los procesa uno por uno ejecutando Función Judicial
-    - Espera 30 minutos después de cada lote
+    - Busca 1 cliente con ESTADO_CONSULTA='Pendiente'
+    - Lo procesa ejecutando consulta en Función Judicial
+    - Cambia ESTADO_CONSULTA a 'Procesado' o 'Error'
+    - Espera 30 minutos
     - Repite indefinidamente hasta ser detenido
     
     Returns:
-        - success: bool - Si se inició correctamente
-        - message: str - Mensaje descriptivo
-        - estado: str - 'running' o 'stopped'
-        - thread_id: int - ID del thread (si se inició)
+        {
+            "success": bool - Si se inició correctamente,
+            "message": str - Mensaje descriptivo,
+            "estado": str - 'running',
+            "thread_id": int - ID del thread
+        }
     """
     try:
         resultado = iniciar_daemon()
@@ -52,9 +55,11 @@ def endpoint_detener_daemon() -> Dict[str, Any]:
     y luego se detendrá sin iniciar nuevos procesamientos.
     
     Returns:
-        - success: bool - Si se detuvo correctamente
-        - message: str - Mensaje descriptivo
-        - estado: str - 'running' o 'stopped'
+        {
+            "success": bool - Si se detuvo correctamente,
+            "message": str - Mensaje descriptivo,
+            "estado": str - 'stopped'
+        }
     """
     try:
         resultado = detener_daemon()
@@ -72,10 +77,12 @@ def endpoint_estado_daemon() -> Dict[str, Any]:
     Consulta el estado actual del daemon procesador.
     
     Returns:
-        - running: bool - Si el daemon está ejecutándose
-        - thread_alive: bool - Si el thread del daemon está vivo
-        - clientes_procesados_en_lote: int - Clientes procesados en el lote actual
-        - ultimo_lote_inicio: str - Timestamp del último lote iniciado (ISO format)
+        {
+            "running": bool - Si el daemon está ejecutándose,
+            "thread_alive": bool - Si el thread del daemon está vivo,
+            "cliente_actual": str - Nombre del cliente en proceso (opcional),
+            "ultimo_inicio": str - Timestamp del último inicio (ISO format)
+        }
     """
     try:
         estado = obtener_estado_daemon()
@@ -85,26 +92,3 @@ def endpoint_estado_daemon() -> Dict[str, Any]:
             status_code=500,
             detail=f"Error obteniendo estado: {str(e)}"
         )
-
-
-@router.get("/health", summary="Health check del daemon")
-def health_check_daemon() -> Dict[str, Any]:
-    """
-    Verifica que el sistema de daemon esté operativo.
-    """
-    try:
-        estado = obtener_estado_daemon()
-        
-        return {
-            "status": "healthy",
-            "daemon_available": True,
-            "daemon_running": estado.get("running", False),
-            "message": "Sistema de daemon operativo"
-        }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "daemon_available": False,
-            "error": str(e),
-            "message": "Error en sistema de daemon"
-        }
