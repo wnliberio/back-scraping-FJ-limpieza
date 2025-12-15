@@ -174,7 +174,9 @@ def generar_reporte_httpx(
         # 1. Crear documento
         doc = Document()
         doc.add_heading(f"Procesos judiciales de: {nombre_cliente}", level=1)
-        doc.add_paragraph(f"Fecha de consulta: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        doc.add_paragraph(f"FECHA DE CONSULTA: {datetime.now().strftime('%Y-%m-%d')}") # No Incluye la hora
+        # -- Se podría agregar la hora de la Consulta pero no la ponemos por que las consultas serían muy exactas y se nota automatizació
+        # -- doc.add_paragraph(f"FECHA DE CONSULTA: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
         doc.add_paragraph("")  # Espacio
         
         # 2. Recorrer páginas
@@ -251,9 +253,9 @@ def generar_reporte_httpx(
             doc.add_paragraph(mensaje)
         
         # Resumen final
-        doc.add_heading("Resumen", level=2)
-        doc.add_paragraph(f"Total de procesos encontrados: {total_resultados}")
-        doc.add_paragraph(f"Páginas consultadas: {pagina_actual}")
+        #doc.add_heading("Resumen", level=2)
+        #doc.add_paragraph(f"Total de procesos encontrados: {total_resultados}")
+        #doc.add_paragraph(f"Páginas consultadas: {pagina_actual}")
         
         # Guardar documento
         nombre_archivo = f"reporte_FJ_httpx_{nombre_cliente.replace(' ', '_')}_{job_id}.docx"
