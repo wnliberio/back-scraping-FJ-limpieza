@@ -248,7 +248,7 @@ def generar_reporte_httpx(
             mensaje = f"Se encontraron {total_resultados} procesos judiciales en {pagina_actual} página(s)"
         else:
             scenario = "no_results"
-            mensaje = "No se encontraron procesos judiciales"
+            mensaje = "NO SE ENCONTRARON PROCESOS JUDICIALES"
             # Agregar mensaje al documento
             doc.add_paragraph(mensaje)
         
