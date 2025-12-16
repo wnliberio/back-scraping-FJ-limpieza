@@ -16,6 +16,7 @@ from datetime import datetime
 import uuid
 import os
 import traceback
+import re
 
 from app.db import SessionLocal
 from app.db.models import DeClienteV2
@@ -34,6 +35,44 @@ def log(msg: str):
     """Logging con timestamp"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[DAEMON {timestamp}] {msg}")
+
+
+def _construir_nombre_busqueda(apellidos: str, nombres: str) -> str:
+    """
+    Genera el nombre completo del cliente de forma segura, manejando
+    diferentes tipos de cliente (empresa o persona natural) y la posible
+    ausencia de nombres o apellidos.
+    """
+    log(f"🔍 DEBUG - Valores crudos de BD:")
+    log(f"   APELLIDOS_CLIENTE: '{apellidos}'")
+    log(f"   NOMBRES_CLIENTE: '{nombres}'")
+
+    apellidos = (apellidos or "").strip()
+    nombres = (nombres or "").strip()
+
+    # 🔹 Corrección exacta:
+    # - '-' → espacio
+    # - '.' → eliminar
+    apellidos = apellidos.replace("-", " ").replace(".", "")
+    nombres = nombres.replace("-", " ").replace(".", "")
+
+    # Construir nombre
+    if apellidos and nombres:
+        nombre_completo = f"{apellidos} {nombres}"
+    elif apellidos:
+        nombre_completo = apellidos
+    elif nombres:
+        nombre_completo = nombres
+    else:
+        nombre_completo = ""
+
+    # Normalizar espacios múltiples
+    nombre_limpio = " ".join(nombre_completo.split())
+
+    log(f"🔍 DEBUG - Nombre final para API:")
+    log(f"   '{nombre_limpio}'")
+
+    return nombre_limpio
 
 
 def _actualizar_cliente_estado(cliente_id: int, estado: str):
@@ -116,8 +155,14 @@ def _obtener_cliente_datos(cliente_id: int) -> dict:
                 'cliente_id': cliente_id,
             }
         
+        # ✅ USAR LA FUNCIÓN ROBUSTA PARA CONSTRUIR EL NOMBRE
+        nombre_cliente = _construir_nombre_busqueda(
+            cliente.APELLIDOS_CLIENTE,
+            cliente.NOMBRES_CLIENTE
+        )
+        
         return {
-            'cliente_nombre': f"{cliente.APELLIDOS_CLIENTE or ''} {cliente.NOMBRES_CLIENTE or ''}".strip(),
+            'cliente_nombre': nombre_cliente,
             'cliente_cedula': cliente.CEDULA or '',
             # Cónyuge - campos separados (compatibilidad con código existente)
             'nombre_conyuge': cliente.NOMBRES_CONYUGE or '',
@@ -233,9 +278,9 @@ def _ejecutar_consulta_funcion_judicial(
     """
     FLUJO SIMPLIFICADO - SOLO HTTPX (API DIRECTA):
     
-    ✅ CASO 1: HTTPX + resultados → Reporte con datos → Procesado
-    ✅ CASO 2: HTTPX + sin procesos → Reporte sin datos → Procesado
-    ❌ CASO 3: HTTPX + error API (500, timeout) → NO reporte → Pendiente
+     CASO 1: HTTPX + resultados → Reporte con datos → Procesado
+     CASO 2: HTTPX + sin procesos → Reporte sin datos → Procesado
+     CASO 3: HTTPX + error API (500, timeout) → NO reporte → Pendiente
     """
     log(f"🌐 Consultando API Función Judicial para: {nombres}")
     
@@ -252,9 +297,9 @@ def _ejecutar_consulta_funcion_judicial(
         
         scenario = resultado_httpx.get('scenario', 'error')
         
-        # ✅ CASO 1: HTTPX + RESULTADOS ENCONTRADOS
+        #  CASO 1: HTTPX + RESULTADOS ENCONTRADOS
         if scenario == 'results_found' and ruta_reporte is not None:
-            log(f"✅ [CASO 1] HTTPX encontró procesos judiciales")
+            log(f"  [CASO 1] HTTPX encontró procesos judiciales")
             log(f"   - Reporte: {ruta_reporte}")
             log(f"   - Procesos: {resultado_httpx.get('total_procesos', 0)}")
             
@@ -268,13 +313,13 @@ def _ejecutar_consulta_funcion_judicial(
                 return True
             else:
                 # Error BD pero reporte existe, marcar como completado igual
-                log(f"⚠️ Reporte generado pero error guardando en BD")
+                log(f" Reporte generado pero error guardando en BD")
                 _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
                 return True
         
-        # ✅ CASO 2: HTTPX + SIN PROCESOS JUDICIALES (API respondió OK pero lista vacía)
+        #  CASO 2: HTTPX + SIN PROCESOS JUDICIALES (API respondió OK pero lista vacía)
         elif scenario == 'no_results' and ruta_reporte is not None:
-            log(f"✅ [CASO 2] HTTPX: No se encontraron procesos judiciales")
+            log(f" [CASO 2] HTTPX: No se encontraron procesos judiciales")
             log(f"   - Reporte: {ruta_reporte}")
             
             # Guardar en BD (reporte vacío pero válido)
@@ -338,8 +383,19 @@ def _daemon_loop():
             if not cliente:
                 log("📭 No hay clientes pendientes")
             else:
-                nombres = f"{cliente.APELLIDOS_CLIENTE} {cliente.NOMBRES_CLIENTE}".strip()
+                # ✅ USAR LA FUNCIÓN ROBUSTA PARA CONSTRUIR EL NOMBRE
+                nombres = _construir_nombre_busqueda(
+                    cliente.APELLIDOS_CLIENTE,
+                    cliente.NOMBRES_CLIENTE
+                )
+                
                 log(f"📋 Procesando: {nombres} (ID: {cliente.id})")
+                
+                # Validar que tengamos un nombre válido
+                if not nombres:
+                    log(f"⚠️ Cliente {cliente.id} no tiene nombre válido - saltando")
+                    _actualizar_cliente_estado(cliente.id, 'Error')
+                    continue
                 
                 # Cambiar a Procesando
                 _actualizar_cliente_estado(cliente.id, 'Procesando')

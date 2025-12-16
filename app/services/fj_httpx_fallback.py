@@ -110,6 +110,13 @@ def _consultar_pagina_api(nombre_buscado: str, page: int) -> Tuple[Optional[List
             "pageSize": PAGE_SIZE
         }
         
+        # ===== DEBUG: Ver exactamente qué se envía =====
+        log(f"🔍 DEBUG - Payload a enviar:")
+        log(f"   URL: {url}")
+        log(f"   nombreDemandado: '{nombre_buscado}'")
+        log(f"   Repr: {repr(nombre_buscado)}")
+        log(f"   Longitud: {len(nombre_buscado)} caracteres")
+        
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -119,21 +126,37 @@ def _consultar_pagina_api(nombre_buscado: str, page: int) -> Tuple[Optional[List
         with httpx.Client(timeout=30.0) as client:
             response = client.post(url, json=payload, headers=headers)
         
+        # ===== DEBUG: Ver respuesta =====
+        log(f"🔍 DEBUG - Respuesta API:")
+        log(f"   Status: {response.status_code}")
+        
         # ✅ CORRECCIÓN: Distinguir entre error de API vs sin resultados
         if response.status_code != 200:
             log(f"⚠️ API retornó status {response.status_code}")
+            # Intentar ver el cuerpo del error
+            try:
+                error_body = response.text[:500]  # Primeros 500 chars
+                log(f"   Body error: {error_body}")
+            except:
+                pass
             return (None, False)  # Error de API
         
         # Parsear respuesta
         data = response.json()
         
-        # La API puede retornar dict o list
+        # ===== DEBUG: Ver datos recibidos =====
+        log(f"🔍 DEBUG - Datos recibidos:")
+        log(f"   Tipo: {type(data).__name__}")
         if isinstance(data, dict):
+            log(f"   Keys: {list(data.keys())}")
             resultados = data.get("data", [])
         elif isinstance(data, list):
             resultados = data
         else:
+            log(f"   Formato inesperado")
             return (None, False)  # Respuesta inválida
+        
+        log(f"   Cantidad resultados: {len(resultados) if resultados else 0}")
         
         # ✅ API respondió 200 exitosamente
         if resultados:
