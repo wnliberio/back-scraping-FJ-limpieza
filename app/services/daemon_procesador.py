@@ -1,13 +1,13 @@
-# app/services/daemon_procesador.py - VERSIÓN MEJORADA
+# app/services/daemon_procesador.py - VERSIÓN HTTPX DIRECTO (SIN SCRAPING)
 """
-Daemon con lógica inteligente - GENERAR REPORTE EN 4 CASOS:
+Daemon con consulta directa a API de Función Judicial via HTTPX.
 
-✅ Caso 1: Scraping + resultados = Reporte con datos
-✅ Caso 2: Scraping + sin procesos = Reporte sin datos
-✅ Caso 3: HTTPX + resultados = Reporte con datos
-✅ Caso 4: HTTPX + "Página 1 sin resultados" = Reporte sin datos ← NUEVO
+✅ CASO 1: HTTPX + resultados = Reporte con datos
+✅ CASO 2: HTTPX + sin procesos = Reporte sin datos
 
 ❌ Error real = Resetear a Pendiente
+
+NOTA: Se eliminó el scraping con Selenium. Ahora usa únicamente HTTPX (API directa).
 """
 
 import threading
@@ -22,15 +22,8 @@ from app.db import SessionLocal
 from app.db.models import DeClienteV2
 from app.db.models_new import DeProceso, DeReporte
 
-# ✅ IMPORTACIONES CORRECTAS
-from flows.funcion_judicial import process_funcion_judicial_once
-from app.services.report_builder import build_report_docx
+# ✅ IMPORTACIÓN HTTPX (única forma de consulta ahora)
 from app.services.fj_httpx_fallback import generar_reporte_httpx
-from app.services.detectores_consulta import (
-    detectar_sin_procesos_judiciales_scraping,
-    verificar_httpx_sin_procesos_judiciales,
-    crear_rastreo_sin_resultados
-)
 
 # ===== ESTADO GLOBAL =====
 daemon_thread = None
@@ -239,170 +232,91 @@ def _ejecutar_consulta_funcion_judicial(
     job_id: str
 ) -> bool:
     """
-    FLUJO CON 4 CASOS DE REPORTE:
+    FLUJO SIMPLIFICADO - SOLO HTTPX (API DIRECTA):
     
-    ✅ CASO 1: Scraping + resultados → build_report_docx + guardar BD → Procesado
-    ✅ CASO 2: Scraping + sin procesos → build_report_docx (vacío) + guardar BD → Procesado
-    ✅ CASO 3: HTTPX + resultados → build_report_docx + guardar BD → Procesado
-    ✅ CASO 4: HTTPX + "Página 1 sin resultados" → build_report_docx (vacío) + guardar BD → Procesado
+    ✅ CASO 1: HTTPX + resultados → Reporte con datos → Procesado
+    ✅ CASO 2: HTTPX + sin procesos → Reporte vacío → Procesado
     ❌ Error real → Resetear a Pendiente
     """
-    log(f"🌐 Intentando web scraping para: {nombres}")
+    log(f"🌐 Consultando API Función Judicial para: {nombres}")
     
     try:
-        # ===== INTENTO 1: WEB SCRAPING =====
-        resultado_scraping = process_funcion_judicial_once(nombres, headless=True)
-        
-        # Obtener datos del cliente
+        # Obtener datos del cliente para el encabezado del reporte
         meta_cliente = _obtener_cliente_datos(cliente_id)
         meta_cliente['fecha_consulta'] = datetime.now()
         
-        # Verificar si fue exitoso
-        if resultado_scraping and isinstance(resultado_scraping, dict) and 'scenario' in resultado_scraping:
-            scenario = resultado_scraping.get('scenario')
-            
-            # ===== CASO 1: SCRAPING EXITOSO CON RESULTADOS =====
-            if scenario == 'results_found':
-                log(f"✅ [CASO 1] Scraping exitoso - Resultados encontrados")
-                
-                try:
-                    # Construir datos para reporte
-                    results = {
-                        'funcion_judicial': resultado_scraping
-                    }
-                    
-                    # ✅ LLAMAR build_report_docx
-                    ruta_reporte = build_report_docx(
-                        job_id=job_id,
-                        meta=meta_cliente,
-                        results=results
-                    )
-                    
-                    if ruta_reporte and os.path.exists(ruta_reporte):
-                        log(f"✅ Reporte generado: {ruta_reporte}")
-                        
-                        if _guardar_reporte_en_bd(
-                            cliente_id, proceso_id, job_id, nombres, 
-                            ruta_reporte, 
-                            'Función Judicial (Scraping con resultados)'
-                        ):
-                            _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                            return True
-                        else:
-                            log(f"⚠️ Reporte generado pero no guardado en BD")
-                            return False
-                except Exception as e:
-                    log(f"⚠️ Error generando reporte: {e}")
-                    _actualizar_cliente_estado(cliente_id, 'Pendiente')
-                    return False
-            
-            # ===== CASO 2: SCRAPING SIN PROCESOS JUDICIALES =====
-            elif scenario == 'no_results':
-                log(f"✅ [CASO 2] Scraping completado: Sin Procesos Judiciales")
-                
-                try:
-                    # Construir datos para reporte (sin datos pero con encabezado)
-                    results = {
-                        'funcion_judicial': resultado_scraping
-                    }
-                    
-                    # ✅ LLAMAR build_report_docx (incluso sin resultados)
-                    ruta_reporte = build_report_docx(
-                        job_id=job_id,
-                        meta=meta_cliente,
-                        results=results
-                    )
-                    
-                    if ruta_reporte and os.path.exists(ruta_reporte):
-                        log(f"✅ Reporte sin procesos generado: {ruta_reporte}")
-                        
-                        if _guardar_reporte_en_bd(
-                            cliente_id, proceso_id, job_id, nombres,
-                            ruta_reporte,
-                            'Función Judicial (Scraping sin procesos)'
-                        ):
-                            _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                            return True
-                        else:
-                            # Reporte generado pero error al guardar BD
-                            # Seguir adelante como "procesado"
-                            _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                            return True
-                except Exception as e:
-                    log(f"⚠️ Error generando reporte sin procesos: {e}")
-                    # Aun así marcar como procesado
-                    _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                    return True
+        # ===== CONSULTA DIRECTA VIA HTTPX =====
+        log(f"🔍 [HTTPX] Iniciando consulta directa a API...")
         
-        # ===== INTENTO 2: HTTPX FALLBACK =====
-        log(f"⚠️ [SCRAPING] Error o indeterminado, intentando HTTP fallback...")
-        log(f"🌐 [HTTPX FALLBACK] Iniciando...")
+        # generar_reporte_httpx retorna (ruta_reporte, resultado_dict)
+        ruta_reporte, resultado_httpx = generar_reporte_httpx(nombres, job_id, meta_cliente)
         
-        # ✅ MEJORA: generar_reporte_httpx retorna (ruta, resultado_dict)
-        ruta_reporte_http, resultado_httpx = generar_reporte_httpx(nombres, job_id, meta_cliente)
-        
-        if ruta_reporte_http is not None:
+        if ruta_reporte is not None:
             # HTTPX generó un reporte (con o sin datos)
-            log(f"✅ [HTTPX FALLBACK] Reporte generado: {ruta_reporte_http}")
+            log(f"✅ [HTTPX] Reporte generado: {ruta_reporte}")
             log(f"   - Escenario: {resultado_httpx.get('scenario')}")
-            log(f"   - Procesos: {resultado_httpx.get('total_procesos')}")
+            log(f"   - Procesos encontrados: {resultado_httpx.get('total_procesos', 0)}")
             
             try:
-                # ✅ CASO 3: HTTPX + RESULTADOS
+                # ✅ CASO 1: HTTPX + RESULTADOS ENCONTRADOS
                 if resultado_httpx.get('scenario') == 'results_found':
-                    log(f"✅ [CASO 3] HTTPX encontró resultados")
+                    log(f"✅ [CASO 1] HTTPX encontró procesos judiciales")
                     
                     # Guardar en BD
                     if _guardar_reporte_en_bd(
                         cliente_id, proceso_id, job_id, nombres,
-                        ruta_reporte_http,
+                        ruta_reporte,
                         'Función Judicial (HTTPX con resultados)'
                     ):
                         _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
                         return True
                     else:
-                        # Error BD pero reporte existe
+                        # Error BD pero reporte existe, marcar como completado igual
+                        log(f"⚠️ Reporte generado pero error guardando en BD")
                         _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
                         return True
                 
-                # ✅ CASO 4: HTTPX + "PÁGINA 1 SIN RESULTADOS" (NUEVO)
+                # ✅ CASO 2: HTTPX + SIN PROCESOS JUDICIALES
                 elif resultado_httpx.get('scenario') == 'no_results':
-                    log(f"✅ [CASO 4] HTTPX: Página 1 sin resultados → Generar reporte vacío")
+                    log(f"✅ [CASO 2] HTTPX: No se encontraron procesos judiciales")
                     
                     # Guardar en BD (aunque sea reporte vacío)
                     if _guardar_reporte_en_bd(
                         cliente_id, proceso_id, job_id, nombres,
-                        ruta_reporte_http,
+                        ruta_reporte,
                         'Función Judicial (HTTPX sin procesos)'
                     ):
                         _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
                         return True
                     else:
                         # Error BD pero reporte existe
+                        log(f"⚠️ Reporte generado pero error guardando en BD")
                         _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
                         return True
                 
                 else:
                     # Escenario error en HTTPX
-                    log(f"⚠️ HTTPX retornó error: {resultado_httpx.get('mensaje')}")
+                    log(f"⚠️ HTTPX retornó escenario inesperado: {resultado_httpx.get('scenario')}")
+                    log(f"   Mensaje: {resultado_httpx.get('mensaje')}")
                     _actualizar_cliente_estado(cliente_id, 'Pendiente')
                     _actualizar_proceso(proceso_id, 'Error_HTTPX', exitoso=False)
                     return False
                     
             except Exception as e:
-                log(f"❌ Error procesando reporte HTTPX: {e}")
+                log(f"❌ Error procesando resultado HTTPX: {e}")
+                traceback.print_exc()
                 _actualizar_cliente_estado(cliente_id, 'Pendiente')
                 return False
         
         else:
-            # ❌ HTTPX retornó error crítico
-            log(f"❌ [HTTPX FALLBACK] Error crítico: {resultado_httpx.get('mensaje')}")
+            # ❌ HTTPX retornó error crítico (ruta_reporte es None)
+            log(f"❌ [HTTPX] Error crítico: {resultado_httpx.get('mensaje', 'Error desconocido')}")
             _actualizar_cliente_estado(cliente_id, 'Pendiente')
             _actualizar_proceso(proceso_id, 'Error_Total', exitoso=False)
             return False
         
     except Exception as e:
-        log(f"❌ Error en scraping: {str(e)}")
+        log(f"❌ Error en consulta HTTPX: {str(e)}")
         traceback.print_exc()
         
         _actualizar_cliente_estado(cliente_id, 'Pendiente')
@@ -415,7 +329,7 @@ def _daemon_loop():
     """Loop principal del daemon"""
     global daemon_running
     
-    log("🚀 Daemon iniciado")
+    log("🚀 Daemon iniciado (Modo: HTTPX Directo)")
     ciclo = 0
     
     while daemon_running:
@@ -445,7 +359,7 @@ def _daemon_loop():
                 # Obtener job_id
                 job_id = _obtener_job_id(proceso_id)
                 
-                # Ejecutar consulta
+                # Ejecutar consulta (HTTPX directo)
                 exito = _ejecutar_consulta_funcion_judicial(
                     proceso_id, cliente.id, nombres, job_id
                 )
@@ -490,7 +404,7 @@ def iniciar_daemon():
         
         return {
             "success": True,
-            "message": "Daemon iniciado",
+            "message": "Daemon iniciado (Modo: HTTPX Directo)",
             "estado": "running",
             "thread_id": daemon_thread.ident
         }
@@ -524,5 +438,6 @@ def obtener_estado_daemon():
     return {
         "running": daemon_running,
         "thread_alive": daemon_thread.is_alive() if daemon_thread else False,
+        "modo": "HTTPX Directo",
         "timestamp": datetime.now().isoformat()
     }
