@@ -107,33 +107,53 @@ def _obtener_cliente_datos(cliente_id: int) -> dict:
         
         if not cliente:
             return {
-                'cliente_nombre': 'N/A',
-                'cliente_cedula': 'N/A',
-                'nombre_conyuge': 'No aplica',
-                'cedula_conyuge': 'No aplica',
-                'nombre_codeudor': 'No aplica',
-                'cedula_codeudor': 'No aplica',
+                'cliente_nombre': '',
+                'cliente_cedula': '',
+                # Cónyuge - campos separados (compatibilidad)
+                'nombre_conyuge': '',
+                'cedula_conyuge': '',
+                # Cónyuge - campos nuevos para APELLIDOS + NOMBRES
+                'nombres_conyuge': '',
+                'apellidos_conyuge': '',
+                # Codeudor - campos separados (compatibilidad)
+                'nombre_codeudor': '',
+                'cedula_codeudor': '',
+                # Codeudor - campos nuevos para APELLIDOS + NOMBRES
+                'nombres_codeudor': '',
+                'apellidos_codeudor': '',
                 'cliente_id': cliente_id,
             }
         
         return {
-            'cliente_nombre': f"{cliente.APELLIDOS_CLIENTE} {cliente.NOMBRES_CLIENTE}".strip(),
-            'cliente_cedula': cliente.CEDULA or 'N/A',
-            'nombre_conyuge': cliente.NOMBRES_CONYUGE or 'No aplica',
-            'cedula_conyuge': cliente.CEDULA_CONYUGE or 'No aplica',
-            'nombre_codeudor': cliente.NOMBRES_CODEUDOR or 'No aplica',
-            'cedula_codeudor': cliente.CEDULA_CODEUDOR or 'No aplica',
+            'cliente_nombre': f"{cliente.APELLIDOS_CLIENTE or ''} {cliente.NOMBRES_CLIENTE or ''}".strip(),
+            'cliente_cedula': cliente.CEDULA or '',
+            # Cónyuge - campos separados (compatibilidad con código existente)
+            'nombre_conyuge': cliente.NOMBRES_CONYUGE or '',
+            'cedula_conyuge': cliente.CEDULA_CONYUGE or '',
+            # Cónyuge - campos nuevos para encabezado profesional
+            'nombres_conyuge': cliente.NOMBRES_CONYUGE or '',
+            'apellidos_conyuge': cliente.APELLIDOS_CONYUGE or '',
+            # Codeudor - campos separados (compatibilidad con código existente)
+            'nombre_codeudor': cliente.NOMBRES_CODEUDOR or '',
+            'cedula_codeudor': cliente.CEDULA_CODEUDOR or '',
+            # Codeudor - campos nuevos para encabezado profesional
+            'nombres_codeudor': cliente.NOMBRES_CODEUDOR or '',
+            'apellidos_codeudor': cliente.APELLIDOS_CODEUDOR or '',
             'cliente_id': cliente_id,
         }
     except Exception as e:
         log(f"⚠️ Error obteniendo datos cliente: {e}")
         return {
-            'cliente_nombre': 'N/A',
-            'cliente_cedula': 'N/A',
-            'nombre_conyuge': 'No aplica',
-            'cedula_conyuge': 'No aplica',
-            'nombre_codeudor': 'No aplica',
-            'cedula_codeudor': 'No aplica',
+            'cliente_nombre': '',
+            'cliente_cedula': '',
+            'nombre_conyuge': '',
+            'cedula_conyuge': '',
+            'nombres_conyuge': '',
+            'apellidos_conyuge': '',
+            'nombre_codeudor': '',
+            'cedula_codeudor': '',
+            'nombres_codeudor': '',
+            'apellidos_codeudor': '',
             'cliente_id': cliente_id,
         }
     finally:
@@ -319,7 +339,7 @@ def _ejecutar_consulta_funcion_judicial(
         log(f"🌐 [HTTPX FALLBACK] Iniciando...")
         
         # ✅ MEJORA: generar_reporte_httpx retorna (ruta, resultado_dict)
-        ruta_reporte_http, resultado_httpx = generar_reporte_httpx(nombres, job_id)
+        ruta_reporte_http, resultado_httpx = generar_reporte_httpx(nombres, job_id, meta_cliente)
         
         if ruta_reporte_http is not None:
             # HTTPX generó un reporte (con o sin datos)

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from typing import Optional, List, Dict, Any, Tuple
 import traceback
+from app.services.word_utils import agregar_linea_clave_valor, agregar_titulo_principal, configurar_documento
 
 # ===== CONFIGURACIÓN =====
 API_BASE_URL = "https://api.funcionjudicial.gob.ec/EXPEL-CONSULTA-CAUSAS-SERVICE"
@@ -141,10 +142,25 @@ def _consultar_pagina_api(nombre_buscado: str, page: int) -> Optional[List[Dict[
         log(f"⚠️ Error consultando API página {page}: {e}")
         return None
 
+# Función auxiliar para formatear nombre completo de encabezado
+def _formatear_nombre_completo(apellidos: str, nombres: str) -> str:
+    """Combina APELLIDOS + NOMBRES, retorna 'NO APLICA' si ambos vacíos"""
+    apellidos = (apellidos or "").strip()
+    nombres = (nombres or "").strip()
+    nombre_completo = f"{apellidos} {nombres}".strip()
+    return nombre_completo if nombre_completo else "NO APLICA"
+
+def _valor_o_no_aplica(valor: str) -> str:
+    """Retorna el valor si existe, sino 'NO APLICA'"""
+    if valor and str(valor).strip() and str(valor).strip().upper() not in ['N/A', 'NA', 'NONE', '']:
+        return str(valor).strip()
+    return "NO APLICA"
+
 
 def generar_reporte_httpx(
     nombre_cliente: str,
-    job_id: str
+    job_id: str,
+    meta: Dict[str, Any] = None
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """
     Genera reporte DOCX consultando API de Función Judicial directamente.
@@ -157,27 +173,55 @@ def generar_reporte_httpx(
     Args:
         nombre_cliente: Nombre completo del cliente (ej: "PAMELA ALEXANDRA CASTRO DEL POZO")
         job_id: ID único del proceso (ej: "daemon_8d8c1f044264")
+        meta: Diccionario con datos del cliente para el encabezado profesional
         
     Returns:
-        Tupla (ruta_reporte, resultado_dict):
-        - ruta_reporte: Ruta del DOCX generado (NUNCA None excepto error crítico)
-        - resultado_dict: Dict con info de la consulta {
-            'scenario': 'results_found' | 'no_results',
-            'total_procesos': int,
-            'total_paginas': int,
-            'mensaje': str
-          }
+        Tupla (ruta_reporte, resultado_dict)
     """
     try:
         log(f"🌐 Iniciando consulta API para: {nombre_cliente}")
         
         # 1. Crear documento
         doc = Document()
-        doc.add_heading(f"Procesos judiciales de: {nombre_cliente}", level=1)
-        doc.add_paragraph(f"FECHA DE CONSULTA: {datetime.now().strftime('%Y-%m-%d')}") # No Incluye la hora
-        # -- Se podría agregar la hora de la Consulta pero no la ponemos por que las consultas serían muy exactas y se nota automatizació
-        # -- doc.add_paragraph(f"FECHA DE CONSULTA: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-        doc.add_paragraph("")  # Espacio
+        configurar_documento(doc)  # ✅ Aplicar estilos globales
+        agregar_titulo_principal(doc, "Revisión de Función Judicial")
+        doc.add_paragraph("")  # Espacio después del título
+        
+        # ===== ENCABEZADO PROFESIONAL (7 CAMPOS CLAVE-VALOR) =====
+        if meta:
+            # Fecha de consulta
+            agregar_linea_clave_valor(doc, "FECHA DE CONSULTA", datetime.now().strftime("%d/%m/%Y"))
+            
+            # Titular
+            agregar_linea_clave_valor(doc, "NOMBRE Y APELLIDO DEL TITULAR", _valor_o_no_aplica(meta.get('cliente_nombre')))
+            agregar_linea_clave_valor(doc, "NUMERO DE CEDULA DEL TITULAR", _valor_o_no_aplica(meta.get('cliente_cedula')))
+            
+            # Cónyuge: combinar APELLIDOS + NOMBRES
+            nombre_conyuge_completo = _formatear_nombre_completo(
+                meta.get('apellidos_conyuge', ''),
+                meta.get('nombres_conyuge', '')
+            )
+            agregar_linea_clave_valor(doc, "NOMBRE DEL CONYUGE", nombre_conyuge_completo)
+            agregar_linea_clave_valor(doc, "CEDULA DEL CONYUGE", _valor_o_no_aplica(meta.get('cedula_conyuge')))
+            
+            # Codeudor: combinar APELLIDOS + NOMBRES
+            nombre_codeudor_completo = _formatear_nombre_completo(
+                meta.get('apellidos_codeudor', ''),
+                meta.get('nombres_codeudor', '')
+            )
+            agregar_linea_clave_valor(doc, "NOMBRE DE CODEUDOR", nombre_codeudor_completo)
+            agregar_linea_clave_valor(doc, "CEDULA DEL CODEUDOR", _valor_o_no_aplica(meta.get('cedula_codeudor')))
+        else:
+            # Fallback: si no hay meta, usar datos mínimos
+            agregar_linea_clave_valor(doc, "FECHA DE CONSULTA", datetime.now().strftime("%d/%m/%Y"))
+            agregar_linea_clave_valor(doc, "NOMBRE Y APELLIDO DEL TITULAR", nombre_cliente)
+            agregar_linea_clave_valor(doc, "NUMERO DE CEDULA DEL TITULAR", "NO APLICA")
+            agregar_linea_clave_valor(doc, "NOMBRE DEL CONYUGE", "NO APLICA")
+            agregar_linea_clave_valor(doc, "CEDULA DEL CONYUGE", "NO APLICA")
+            agregar_linea_clave_valor(doc, "NOMBRE DE CODEUDOR", "NO APLICA")
+            agregar_linea_clave_valor(doc, "CEDULA DEL CODEUDOR", "NO APLICA")
+        
+        doc.add_paragraph("")  # Espacio después del encabezado
         
         # 2. Recorrer páginas
         contador = 1
@@ -251,11 +295,6 @@ def generar_reporte_httpx(
             mensaje = "NO SE ENCONTRARON PROCESOS JUDICIALES"
             # Agregar mensaje al documento
             doc.add_paragraph(mensaje)
-        
-        # Resumen final
-        #doc.add_heading("Resumen", level=2)
-        #doc.add_paragraph(f"Total de procesos encontrados: {total_resultados}")
-        #doc.add_paragraph(f"Páginas consultadas: {pagina_actual}")
         
         # Guardar documento
         nombre_archivo = f"reporte_FJ_httpx_{nombre_cliente.replace(' ', '_')}_{job_id}.docx"
