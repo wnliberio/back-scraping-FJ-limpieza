@@ -2,10 +2,9 @@
 """
 Daemon con consulta directa a API de Función Judicial via HTTPX.
 
-✅ CASO 1: HTTPX + resultados = Reporte con datos
-✅ CASO 2: HTTPX + sin procesos = Reporte sin datos
-
-❌ Error real = Resetear a Pendiente
+✅ CASO 1: HTTPX + resultados = Reporte con datos → Procesado
+✅ CASO 2: HTTPX + sin procesos = Reporte sin datos → Procesado
+❌ CASO 3: HTTPX + error API (500, timeout) = NO reporte → Pendiente (reintento)
 
 NOTA: Se eliminó el scraping con Selenium. Ahora usa únicamente HTTPX (API directa).
 """
@@ -235,8 +234,8 @@ def _ejecutar_consulta_funcion_judicial(
     FLUJO SIMPLIFICADO - SOLO HTTPX (API DIRECTA):
     
     ✅ CASO 1: HTTPX + resultados → Reporte con datos → Procesado
-    ✅ CASO 2: HTTPX + sin procesos → Reporte vacío → Procesado
-    ❌ Error real → Resetear a Pendiente
+    ✅ CASO 2: HTTPX + sin procesos → Reporte sin datos → Procesado
+    ❌ CASO 3: HTTPX + error API (500, timeout) → NO reporte → Pendiente
     """
     log(f"🌐 Consultando API Función Judicial para: {nombres}")
     
@@ -251,66 +250,62 @@ def _ejecutar_consulta_funcion_judicial(
         # generar_reporte_httpx retorna (ruta_reporte, resultado_dict)
         ruta_reporte, resultado_httpx = generar_reporte_httpx(nombres, job_id, meta_cliente)
         
-        if ruta_reporte is not None:
-            # HTTPX generó un reporte (con o sin datos)
-            log(f"✅ [HTTPX] Reporte generado: {ruta_reporte}")
-            log(f"   - Escenario: {resultado_httpx.get('scenario')}")
-            log(f"   - Procesos encontrados: {resultado_httpx.get('total_procesos', 0)}")
-            
-            try:
-                # ✅ CASO 1: HTTPX + RESULTADOS ENCONTRADOS
-                if resultado_httpx.get('scenario') == 'results_found':
-                    log(f"✅ [CASO 1] HTTPX encontró procesos judiciales")
-                    
-                    # Guardar en BD
-                    if _guardar_reporte_en_bd(
-                        cliente_id, proceso_id, job_id, nombres,
-                        ruta_reporte,
-                        'Función Judicial (HTTPX con resultados)'
-                    ):
-                        _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                        return True
-                    else:
-                        # Error BD pero reporte existe, marcar como completado igual
-                        log(f"⚠️ Reporte generado pero error guardando en BD")
-                        _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                        return True
-                
-                # ✅ CASO 2: HTTPX + SIN PROCESOS JUDICIALES
-                elif resultado_httpx.get('scenario') == 'no_results':
-                    log(f"✅ [CASO 2] HTTPX: No se encontraron procesos judiciales")
-                    
-                    # Guardar en BD (aunque sea reporte vacío)
-                    if _guardar_reporte_en_bd(
-                        cliente_id, proceso_id, job_id, nombres,
-                        ruta_reporte,
-                        'Función Judicial (HTTPX sin procesos)'
-                    ):
-                        _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                        return True
-                    else:
-                        # Error BD pero reporte existe
-                        log(f"⚠️ Reporte generado pero error guardando en BD")
-                        _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
-                        return True
-                
-                else:
-                    # Escenario error en HTTPX
-                    log(f"⚠️ HTTPX retornó escenario inesperado: {resultado_httpx.get('scenario')}")
-                    log(f"   Mensaje: {resultado_httpx.get('mensaje')}")
-                    _actualizar_cliente_estado(cliente_id, 'Pendiente')
-                    _actualizar_proceso(proceso_id, 'Error_HTTPX', exitoso=False)
-                    return False
-                    
-            except Exception as e:
-                log(f"❌ Error procesando resultado HTTPX: {e}")
-                traceback.print_exc()
-                _actualizar_cliente_estado(cliente_id, 'Pendiente')
-                return False
+        scenario = resultado_httpx.get('scenario', 'error')
         
+        # ✅ CASO 1: HTTPX + RESULTADOS ENCONTRADOS
+        if scenario == 'results_found' and ruta_reporte is not None:
+            log(f"✅ [CASO 1] HTTPX encontró procesos judiciales")
+            log(f"   - Reporte: {ruta_reporte}")
+            log(f"   - Procesos: {resultado_httpx.get('total_procesos', 0)}")
+            
+            # Guardar en BD
+            if _guardar_reporte_en_bd(
+                cliente_id, proceso_id, job_id, nombres,
+                ruta_reporte,
+                'Función Judicial (HTTPX con resultados)'
+            ):
+                _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
+                return True
+            else:
+                # Error BD pero reporte existe, marcar como completado igual
+                log(f"⚠️ Reporte generado pero error guardando en BD")
+                _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
+                return True
+        
+        # ✅ CASO 2: HTTPX + SIN PROCESOS JUDICIALES (API respondió OK pero lista vacía)
+        elif scenario == 'no_results' and ruta_reporte is not None:
+            log(f"✅ [CASO 2] HTTPX: No se encontraron procesos judiciales")
+            log(f"   - Reporte: {ruta_reporte}")
+            
+            # Guardar en BD (reporte vacío pero válido)
+            if _guardar_reporte_en_bd(
+                cliente_id, proceso_id, job_id, nombres,
+                ruta_reporte,
+                'Función Judicial (HTTPX sin procesos)'
+            ):
+                _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
+                return True
+            else:
+                log(f"⚠️ Reporte generado pero error guardando en BD")
+                _actualizar_proceso(proceso_id, 'Completado', exitoso=True)
+                return True
+        
+        # ❌ CASO 3: ERROR DE API (500, timeout, etc.) - NO generar reporte
+        elif scenario == 'api_error':
+            log(f"❌ [CASO 3] Error de API - Cliente volverá a Pendiente")
+            log(f"   - Mensaje: {resultado_httpx.get('mensaje', 'Error desconocido')}")
+            log(f"   - El cliente se reintentará en el próximo ciclo")
+            
+            # NO generar reporte, resetear cliente a Pendiente
+            _actualizar_cliente_estado(cliente_id, 'Pendiente')
+            _actualizar_proceso(proceso_id, 'Error_API', exitoso=False)
+            return False
+        
+        # ❌ OTROS ERRORES
         else:
-            # ❌ HTTPX retornó error crítico (ruta_reporte es None)
-            log(f"❌ [HTTPX] Error crítico: {resultado_httpx.get('mensaje', 'Error desconocido')}")
+            log(f"❌ Error inesperado - scenario: {scenario}")
+            log(f"   - Mensaje: {resultado_httpx.get('mensaje', 'Error desconocido')}")
+            
             _actualizar_cliente_estado(cliente_id, 'Pendiente')
             _actualizar_proceso(proceso_id, 'Error_Total', exitoso=False)
             return False
@@ -368,7 +363,7 @@ def _daemon_loop():
                     _actualizar_cliente_estado(cliente.id, 'Procesado')
                     log(f"🎉 Cliente {cliente.id} procesado exitosamente")
                 else:
-                    log(f"⚠️ Cliente {cliente.id} no se pudo procesar")
+                    log(f"⚠️ Cliente {cliente.id} volverá a intentarse (Pendiente)")
             
             # Esperar 30 minutos
             log("⏳ Esperando 30 minutos...")
