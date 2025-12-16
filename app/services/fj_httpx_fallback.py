@@ -387,7 +387,7 @@ def generar_reporte_httpx(
             doc.add_paragraph(mensaje)
         
         # Guardar documento
-        nombre_archivo = f"reporte_FJ_httpx_{nombre_cliente.replace(' ', '_')}_{job_id}.docx"
+        nombre_archivo = f"reporte_{nombre_cliente.replace(' ', '_')}.docx"
         ruta_completa = os.path.join(REPORTS_DIR, nombre_archivo)
         
         try:
