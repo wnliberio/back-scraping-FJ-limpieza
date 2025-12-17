@@ -1,7 +1,7 @@
 # app/main.py - VERSIÓN FINAL (con health check corregido)
 
 # ⚠️ CRÍTICO: Cargar .env ANTES de cualquier otra importación
-from app.load_env import verificar_credenciales
+
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

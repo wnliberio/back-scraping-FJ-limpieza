@@ -315,7 +315,7 @@ def generar_reporte_httpx(
                 row[1].text = fecha_formato
                 row[2].text = str(caso.get("idJuicio", "N/A"))
                 row[3].text = str(caso.get("nombreDelito", "N/A"))
-                row[4].text = "Movimientos del Proceso"
+                row[4].text = "🗂️"
                 
                 contador += 1
             
